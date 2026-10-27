@@ -169,6 +169,7 @@ func New(config *Config) (*Instance, error) {
 
 	done, err := initInstanceWithConfig(config, server)
 	if done {
+		server.Close()
 		return nil, err
 	}
 
@@ -180,6 +181,7 @@ func NewWithContext(ctx context.Context, config *Config) (*Instance, error) {
 
 	done, err := initInstanceWithConfig(config, server)
 	if done {
+		server.Close()
 		return nil, err
 	}
 
