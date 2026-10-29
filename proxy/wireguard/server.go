@@ -352,12 +352,12 @@ func (s *Server) HandleConnection(conn net.Conn, dest net.Destination) {
 
 	source := net.DestinationFromAddr(remote)
 	inbound := session.Inbound{
-		Name:          "wireguard",
-		Tag:           s.tag,
-		CanSpliceCopy: 3,
-		Source:        source,
-		User:          user,
+		Name:   "wireguard",
+		Tag:    s.tag,
+		Source: source,
+		User:   user,
 	}
+	inbound.CanSpliceCopy.Store(3)
 
 	ctx = session.ContextWithInbound(ctx, &inbound)
 	ctx = session.ContextWithContent(ctx, &session.Content{

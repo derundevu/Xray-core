@@ -101,7 +101,7 @@ func NewServerWorker(ctx context.Context, d routing.Dispatcher, link *transport.
 		timer:          time.NewTicker(60 * time.Second),
 	}
 	if inbound := session.InboundFromContext(ctx); inbound != nil {
-		inbound.CanSpliceCopy = 3
+		inbound.CanSpliceCopy.Store(3)
 	}
 	go worker.run(ctx)
 	go worker.monitor()
@@ -166,10 +166,10 @@ func (w *ServerWorker) handleStatusNew(ctx context.Context, meta *FrameMetadata,
 	ctx = session.SubContextFromMuxInbound(ctx)
 	if meta.Inbound != nil && meta.Inbound.Source.IsValid() && meta.Inbound.Local.IsValid() {
 		if inbound := session.InboundFromContext(ctx); inbound != nil {
-			newInbound := *inbound
+			newInbound := inbound.Clone()
 			newInbound.Source = meta.Inbound.Source
 			newInbound.Local = meta.Inbound.Local
-			ctx = session.ContextWithInbound(ctx, &newInbound)
+			ctx = session.ContextWithInbound(ctx, newInbound)
 		}
 	}
 	errors.LogInfo(ctx, "received request for ", meta.Target)

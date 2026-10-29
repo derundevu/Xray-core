@@ -550,18 +550,18 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 	switch requestAddons.Flow {
 	case vless.XRV:
 		if account.Flow == requestAddons.Flow {
-			inbound.CanSpliceCopy = 2
+			inbound.CanSpliceCopy.Store(2)
 			switch request.Command {
 			case protocol.RequestCommandUDP:
 				return errors.New(requestAddons.Flow + " doesn't support UDP")
 			case protocol.RequestCommandMux, protocol.RequestCommandRvs:
-				inbound.CanSpliceCopy = 3
+				inbound.CanSpliceCopy.Store(3)
 				fallthrough // we will break Mux connections that contain TCP requests
 			case protocol.RequestCommandTCP:
 				var target net.Conn
 				if commonConn, ok := connection.(*encryption.CommonConn); ok {
 					if _, ok := commonConn.Conn.(*encryption.XorConn); ok || !proxy.IsRAWTransportWithoutSecurity(iConn) {
-						inbound.CanSpliceCopy = 3 // full-random xorConn / non-RAW transport / another securityConn should not be penetrated
+						inbound.CanSpliceCopy.Store(3) // full-random xorConn / non-RAW transport / another securityConn should not be penetrated
 					}
 					target = commonConn
 				} else if tlsConn, ok := iConn.(*tls.Conn); ok {
@@ -580,7 +580,7 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 			return errors.New("account " + account.ID.String() + " is not able to use the flow " + requestAddons.Flow)
 		}
 	case "":
-		inbound.CanSpliceCopy = 3
+		inbound.CanSpliceCopy.Store(3)
 		if account.Flow == vless.XRV && (request.Command == protocol.RequestCommandTCP || isMuxAndNotXUDP(request, first)) {
 			return errors.New("account " + account.ID.String() + " is rejected since the client flow is empty. Note that the pure TLS proxy has certain TLS in TLS characters.")
 		}

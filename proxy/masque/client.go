@@ -109,7 +109,7 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 		return errors.New("target not specified")
 	}
 	ob.Name = "masque"
-	ob.CanSpliceCopy = 3
+	ob.CanSpliceCopy.Store(3)
 
 	xmuxClient, t, err := c.getTunnel(ctx, dialer)
 	if err != nil {

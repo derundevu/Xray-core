@@ -4,6 +4,7 @@ package session // import "github.com/xtls/xray-core/common/session"
 import (
 	"context"
 	"math/rand"
+	"sync/atomic"
 
 	c "github.com/xtls/xray-core/common/ctx"
 	"github.com/xtls/xray-core/common/errors"
@@ -34,6 +35,7 @@ func ExportIDToError(ctx context.Context) errors.ExportOption {
 }
 
 // Inbound is the metadata of an inbound connection.
+// Inbound must not be copied after first use; use Clone for a metadata snapshot.
 type Inbound struct {
 	// Source address of the inbound connection.
 	Source net.Destination
@@ -53,12 +55,31 @@ type Inbound struct {
 	Conn net.Conn
 	// Used by splice copy. Timer of the inbound buf copier. May be nil.
 	Timer *signal.ActivityTimer
-	// CanSpliceCopy is a property for this connection
-	// 1 = can, 2 = after processing protocol info should be able to, 3 = cannot
-	CanSpliceCopy int
+	// CanSpliceCopy is the atomic splice state for this connection:
+	// 0 = unspecified, 1 = ready, 2 = waiting for protocol processing, 3 = forbidden.
+	CanSpliceCopy atomic.Int32
+}
+
+// Clone returns a shallow copy with an independent snapshot of the splice state.
+// Other metadata must not be modified concurrently with Clone.
+func (i *Inbound) Clone() *Inbound {
+	clone := &Inbound{
+		Source:     i.Source,
+		Local:      i.Local,
+		Gateway:    i.Gateway,
+		Tag:        i.Tag,
+		Name:       i.Name,
+		User:       i.User,
+		VlessRoute: i.VlessRoute,
+		Conn:       i.Conn,
+		Timer:      i.Timer,
+	}
+	clone.CanSpliceCopy.Store(i.CanSpliceCopy.Load())
+	return clone
 }
 
 // Outbound is the metadata of an outbound connection.
+// Outbound must not be copied after first use.
 type Outbound struct {
 	// Target address of the outbound connection.
 	OriginalTarget net.Destination
@@ -70,9 +91,9 @@ type Outbound struct {
 	Tag string
 	// Name of the outbound proxy that handles the connection.
 	Name string
-	// CanSpliceCopy is a property for this connection
-	// 1 = can, 2 = after processing protocol info should be able to, 3 = cannot
-	CanSpliceCopy int
+	// CanSpliceCopy is the atomic splice state for this connection:
+	// 0 = unspecified, 1 = ready, 2 = waiting for protocol processing, 3 = forbidden.
+	CanSpliceCopy atomic.Int32
 }
 
 // SniffingRequest controls the behavior of content sniffing. They are from inbound config. Read-only

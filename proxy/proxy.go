@@ -273,12 +273,10 @@ func (w *VisionReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 		w.rawInput = nil
 
 		if inbound := session.InboundFromContext(w.ctx); inbound != nil && inbound.Conn != nil {
-			// if w.isUplink && inbound.CanSpliceCopy == 2 { // TODO: enable uplink splice
-			// 	inbound.CanSpliceCopy = 1
-			// }
-			if !w.isUplink && w.ob != nil && w.ob.CanSpliceCopy == 2 { // ob need to be passed in due to context can have more than one ob
-				w.ob.CanSpliceCopy = 1
+			if !w.isUplink && w.ob != nil { // ob need to be passed in due to context can have more than one ob
+				w.ob.CanSpliceCopy.CompareAndSwap(2, 1)
 			}
+			// Uplink splice remains disabled.
 		}
 		SuppressOuterCloseNotify(w.conn)
 		readerConn, readCounter, _ := UnwrapRawConn(w.conn)
@@ -337,13 +335,11 @@ func (w *VisionWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 
 	if *switchToDirectCopy {
 		if inbound := session.InboundFromContext(w.ctx); inbound != nil {
-			if !w.isUplink && inbound.CanSpliceCopy == 2 {
+			if !w.isUplink && inbound.CanSpliceCopy.Load() == 2 {
 				spliceReadyInbound = inbound
 			}
-			// if w.isUplink && w.ob != nil && w.ob.CanSpliceCopy == 2 { // TODO: enable uplink splice
-			// 	w.ob.CanSpliceCopy = 1
-			// }
 		}
+		// Uplink splice remains disabled.
 		SuppressOuterCloseNotify(w.conn)
 		rawConn, _, writerCounter := UnwrapRawConn(w.conn)
 		w.Writer = buf.NewWriter(rawConn)
@@ -400,10 +396,10 @@ func (w *VisionWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	if err := w.Writer.WriteMultiBuffer(mb); err != nil {
 		return err
 	}
-	if spliceReadyInbound != nil && spliceReadyInbound.CanSpliceCopy == 2 {
+	if spliceReadyInbound != nil {
 		// Enable splice only after this write has completed to avoid racing
 		// concurrent direct writes to the same TCP connection.
-		spliceReadyInbound.CanSpliceCopy = 1
+		spliceReadyInbound.CanSpliceCopy.CompareAndSwap(2, 1)
 	}
 	return nil
 }
@@ -745,7 +741,7 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 		return readV(ctx, reader, writer, timer, readCounter)
 	}
 	inbound := session.InboundFromContext(ctx)
-	if inbound == nil || inbound.CanSpliceCopy == 3 {
+	if inbound == nil || inbound.CanSpliceCopy.Load() == 3 {
 		return readV(ctx, reader, writer, timer, readCounter)
 	}
 	outbounds := session.OutboundsFromContext(ctx)
@@ -753,7 +749,7 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 		return readV(ctx, reader, writer, timer, readCounter)
 	}
 	for _, ob := range outbounds {
-		if ob.CanSpliceCopy == 3 {
+		if ob.CanSpliceCopy.Load() == 3 {
 			return readV(ctx, reader, writer, timer, readCounter)
 		}
 	}
@@ -761,9 +757,9 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 	for {
 		inbound := session.InboundFromContext(ctx)
 		outbounds := session.OutboundsFromContext(ctx)
-		splice := inbound.CanSpliceCopy == 1
+		splice := inbound.CanSpliceCopy.Load() == 1
 		for _, ob := range outbounds {
-			if ob.CanSpliceCopy != 1 {
+			if ob.CanSpliceCopy.Load() != 1 {
 				splice = false
 			}
 		}

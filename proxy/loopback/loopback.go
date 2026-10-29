@@ -34,11 +34,12 @@ func (l *Loopback) Process(ctx context.Context, link *transport.Link, _ internet
 	content.SniffingRequest = l.sniffingRequest
 
 	ctx = session.ContextWithContent(ctx, content)
-	inbound := &session.Inbound{}
-	originInbound := session.InboundFromContext(ctx)
-	if originInbound != nil {
-		// get a shallow copy to avoid modifying the inbound tag in upstream context
-		*inbound = *originInbound
+	inbound := session.InboundFromContext(ctx)
+	if inbound != nil {
+		// Clone metadata so the loopback tag does not alter the upstream context.
+		inbound = inbound.Clone()
+	} else {
+		inbound = &session.Inbound{}
 	}
 	inbound.Tag = l.inboundTag
 	ctx = session.ContextWithInbound(ctx, inbound)

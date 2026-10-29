@@ -66,12 +66,12 @@ func (s *Server) Network() []net.Network {
 func (s *Server) Process(ctx context.Context, network net.Network, conn stat.Connection, dispatcher routing.Dispatcher) error {
 	inbound := session.InboundFromContext(ctx)
 	inbound.Name = "socks"
-	inbound.CanSpliceCopy = 2
+	inbound.CanSpliceCopy.Store(2)
 	inbound.User = &protocol.MemoryUser{
 		Level: s.config.UserLevel,
 	}
 	if !proxy.IsRAWTransportWithoutSecurity(conn) {
-		inbound.CanSpliceCopy = 3
+		inbound.CanSpliceCopy.Store(3)
 	}
 
 	switch network {
@@ -151,9 +151,7 @@ func (s *Server) processTCP(ctx context.Context, conn stat.Connection, dispatche
 				Reason: "",
 			})
 		}
-		if inbound.CanSpliceCopy == 2 {
-			inbound.CanSpliceCopy = 1
-		}
+		inbound.CanSpliceCopy.CompareAndSwap(2, 1)
 		if err := dispatcher.DispatchLink(
 			ctx, dest, &transport.Link{
 				Reader: reader,
@@ -237,11 +235,11 @@ func (s *Server) handleUDPPayload(ctx context.Context, conn stat.Connection, dis
 		}
 		changeRemote.Do(func() {
 			if inbound != nil {
-				newInbound := *inbound
+				newInbound := inbound.Clone()
 				// change source to real remote UDP address
 				newInbound.Source = net.DestinationFromAddr(conn.RemoteAddr())
 				newInbound.Local = net.DestinationFromAddr(conn.LocalAddr())
-				inbound = &newInbound
+				inbound = newInbound
 				ctx = session.ContextWithInbound(ctx, inbound)
 				errors.LogInfo(ctx, "client UDP connection from ", inbound.Source)
 			}

@@ -267,7 +267,7 @@ func (s *Server) Process(ctx context.Context, network net.Network, conn stat.Con
 	}
 	inbound := session.InboundFromContext(ctx)
 	inbound.Name = "masque"
-	inbound.CanSpliceCopy = 3
+	inbound.CanSpliceCopy.Store(3)
 
 	name, pass, _ := sconn.Request().BasicAuth()
 	user := s.validator.get(name, pass)
@@ -515,12 +515,12 @@ func (s *Server) HandleConnection(conn net.Conn, dest net.Destination) {
 	defer cancel()
 	ctx = c.ContextWithID(ctx, session.NewID())
 	inbound := session.Inbound{
-		Name:          "masque",
-		Tag:           s.tag,
-		CanSpliceCopy: 3,
-		Source:        source,
-		User:          t.user,
+		Name:   "masque",
+		Tag:    s.tag,
+		Source: source,
+		User:   t.user,
 	}
+	inbound.CanSpliceCopy.Store(3)
 	ctx = session.ContextWithInbound(ctx, &inbound)
 	ctx = session.ContextWithContent(ctx, &session.Content{
 		SniffingRequest: s.sniffing,
