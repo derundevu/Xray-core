@@ -27,7 +27,8 @@ const (
 	mitmAlpn11Key             ctx.SessionKey = 11 // used by TLS dialer
 	mitmServerNameKey         ctx.SessionKey = 12 // used by TLS dialer
 
-	streamSettingsKey ctx.SessionKey = 13
+	streamSettingsKey          ctx.SessionKey = 13
+	cancellationPropagationKey ctx.SessionKey = 14
 )
 
 func ContextWithInbound(ctx context.Context, inbound *Inbound) context.Context {
@@ -149,6 +150,18 @@ func TimeoutOnlyFromContext(ctx context.Context) bool {
 		return val
 	}
 	return false
+}
+
+// ContextWithCancellationPropagation keeps chained outbound handlers bound to
+// their caller's lifetime. Bounded one-shot probes opt in; ordinary data streams
+// retain the detached lifetime needed to drain their responses.
+func ContextWithCancellationPropagation(ctx context.Context, propagate bool) context.Context {
+	return context.WithValue(ctx, cancellationPropagationKey, propagate)
+}
+
+func CancellationPropagationFromContext(ctx context.Context) bool {
+	propagate, _ := ctx.Value(cancellationPropagationKey).(bool)
+	return propagate
 }
 
 func ContextWithAllowedNetwork(ctx context.Context, network net.Network) context.Context {

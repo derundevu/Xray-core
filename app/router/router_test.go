@@ -274,3 +274,56 @@ func TestIPIfNonMatchIP(t *testing.T) {
 		t.Error("expect tag 'test', bug actually ", tag)
 	}
 }
+
+func TestLiveFallbackPreservesIPIfNonMatchAndRollback(t *testing.T) {
+	config := &Config{
+		DomainStrategy: Config_IpIfNonMatch,
+		Rule: []*RoutingRule{{
+			TargetTag: &RoutingRule_Tag{Tag: "resolved"},
+			Ip: []*geodata.IPRule{{
+				Value: &geodata.IPRule_Custom{Custom: &geodata.CIDRRule{
+					Cidr: &geodata.CIDR{Ip: []byte{127, 0, 0, 0}, Prefix: 8},
+				}},
+			}},
+		}},
+	}
+	controller := gomock.NewController(t)
+	defer controller.Finish()
+	client := mocks.NewDNSClient(controller)
+	option := dns.IPOption{IPv4Enable: true, IPv6Enable: true}
+	client.EXPECT().LookupIP("resolved.invalid", option).Return([]net.IP{{127, 0, 0, 1}}, uint32(60), nil)
+	client.EXPECT().LookupIP("fallback.invalid", option).Return([]net.IP{{192, 0, 2, 1}}, uint32(60), nil)
+	r := new(Router)
+	common.Must(r.Init(context.Background(), config, client, nil, nil))
+	defer r.Close()
+	common.Must(r.ReloadRulesWithFallback(config, "new-default"))
+	pick := func(destination net.Destination, want string) {
+		t.Helper()
+		ctx := session.ContextWithOutbounds(context.Background(), []*session.Outbound{{Target: destination}})
+		route, err := r.PickRoute(routing_session.AsRoutingContext(ctx))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := route.GetOutboundTag(); got != want {
+			t.Fatalf("route got %q, want %q", got, want)
+		}
+	}
+	pick(net.TCPDestination(net.DomainAddress("resolved.invalid"), 80), "resolved")
+	pick(net.TCPDestination(net.DomainAddress("fallback.invalid"), 80), "new-default")
+	pick(net.TCPDestination(net.IPAddress([]byte{192, 0, 2, 1}), 80), "new-default")
+	if got := len(r.ListRule()); got != 1 {
+		t.Fatalf("internal fallback exposed as a user rule: got %d rules", got)
+	}
+	bad := &Config{Rule: []*RoutingRule{
+		{RuleTag: "duplicate", TargetTag: &RoutingRule_Tag{Tag: "wrong"}, Networks: []net.Network{net.Network_TCP}},
+		{RuleTag: "duplicate", TargetTag: &RoutingRule_Tag{Tag: "wrong"}, Networks: []net.Network{net.Network_TCP}},
+	}}
+	if err := r.ReloadRulesWithFallback(bad, "wrong-default"); err == nil {
+		t.Fatal("duplicate tags accepted")
+	}
+	pick(net.TCPDestination(net.IPAddress([]byte{192, 0, 2, 1}), 80), "new-default")
+	common.Must(r.ReloadRules(&Config{Rule: []*RoutingRule{{
+		TargetTag: &RoutingRule_Tag{Tag: "appended"}, Networks: []net.Network{net.Network_TCP},
+	}}}, true))
+	pick(net.TCPDestination(net.IPAddress([]byte{192, 0, 2, 1}), 80), "appended")
+}

@@ -273,6 +273,11 @@ func (h *Handler) Dial(ctx context.Context, dest net.Destination) (stat.Connecti
 	}
 
 	conn, err := internet.Dial(ctx, dest, h.streamSettings)
+	if conn != nil && session.CancellationPropagationFromContext(ctx) {
+		// Bind only per-probe connections. Shared mux workers use their own
+		// unmarked context, so canceling a probe cannot close their transport.
+		conn = newCancellationBoundConnection(ctx, conn)
+	}
 	conn = h.getStatCouterConnection(conn)
 	return conn, err
 }

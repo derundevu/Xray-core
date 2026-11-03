@@ -2,9 +2,6 @@ package observatory
 
 import (
 	"context"
-	"net"
-	"net/http"
-	"net/url"
 	"slices"
 	"sort"
 	"sync"
@@ -12,16 +9,12 @@ import (
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
-	v2net "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/signal/done"
-	"github.com/xtls/xray-core/common/task"
-	"github.com/xtls/xray-core/common/utils"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/extension"
 	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/features/routing"
-	"github.com/xtls/xray-core/transport/internet/tagged"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -39,7 +32,9 @@ type Observer struct {
 }
 
 func (o *Observer) GetObservation(ctx context.Context) (proto.Message, error) {
-	return &ObservationResult{Status: o.status}, nil
+	o.statusLock.Lock()
+	defer o.statusLock.Unlock()
+	return proto.Clone(&ObservationResult{Status: o.status}), nil
 }
 
 func (o *Observer) Type() interface{} {
@@ -135,69 +130,20 @@ func (o *Observer) clearRemovedOutbounds(outbounds []string) {
 
 func (o *Observer) probe(outbound string) ProbeResult {
 	errorCollectorForRequest := newErrorCollector()
-
-	httpTransport := http.Transport{
-		Proxy: func(*http.Request) (*url.URL, error) {
-			return nil, nil
-		},
-		DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
-			var connection net.Conn
-			taskErr := task.Run(ctx, func() error {
-				// MUST use Xray's built in context system
-				dest, err := v2net.ParseDestination(network + ":" + addr)
-				if err != nil {
-					return errors.New("cannot understand address").Base(err)
-				}
-				trackedCtx := session.TrackedConnectionError(o.ctx, errorCollectorForRequest)
-				conn, err := tagged.Dialer(trackedCtx, o.dispatcher, dest, outbound)
-				if err != nil {
-					return errors.New("cannot dial remote address ", dest).Base(err)
-				}
-				connection = conn
-				return nil
-			})
-			if taskErr != nil {
-				return nil, errors.New("cannot finish connection").Base(taskErr)
-			}
-			return connection, nil
-		},
-		TLSHandshakeTimeout: time.Second * 5,
+	ctx := session.TrackedConnectionError(o.ctx, errorCollectorForRequest)
+	probeURL := "https://www.google.com/generate_204"
+	if o.config.ProbeUrl != "" {
+		probeURL = o.config.ProbeUrl
 	}
-	httpClient := &http.Client{
-		Transport: &httpTransport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-		Jar:     nil,
-		Timeout: time.Second * 5,
+	// Stock Observatory considers any completed HTTP response successful.
+	result := probeHTTP(ctx, o.dispatcher, outbound, probeURL, 5*time.Second, false)
+	if !result.Alive {
+		result.LastErrorReason = "the outbound " + outbound + " is dead: GET request failed:" + result.LastErrorReason + "with outbound handler report underlying connection failed"
+		errors.LogInfoInner(o.ctx, errorCollectorForRequest.UnderlyingError(), result.LastErrorReason)
+		return result
 	}
-	var GETTime time.Duration
-	err := task.Run(o.ctx, func() error {
-		startTime := time.Now()
-		probeURL := "https://www.google.com/generate_204"
-		if o.config.ProbeUrl != "" {
-			probeURL = o.config.ProbeUrl
-		}
-		req, _ := http.NewRequest(http.MethodGet, probeURL, nil)
-		utils.TryDefaultHeadersWith(req.Header, "nav")
-		response, err := httpClient.Do(req)
-		if err != nil {
-			return errors.New("outbound failed to relay connection").Base(err)
-		}
-		if response.Body != nil {
-			response.Body.Close()
-		}
-		endTime := time.Now()
-		GETTime = endTime.Sub(startTime)
-		return nil
-	})
-	if err != nil {
-		errorMessage := "the outbound " + outbound + " is dead: GET request failed:" + err.Error() + "with outbound handler report underlying connection failed"
-		errors.LogInfoInner(o.ctx, errorCollectorForRequest.UnderlyingError(), errorMessage)
-		return ProbeResult{Alive: false, LastErrorReason: errorMessage}
-	}
-	errors.LogInfo(o.ctx, "the outbound ", outbound, " is alive:", GETTime.Seconds())
-	return ProbeResult{Alive: true, Delay: GETTime.Milliseconds()}
+	errors.LogInfo(o.ctx, "the outbound ", outbound, " is alive:", float64(result.Delay)/1000)
+	return result
 }
 
 func (o *Observer) updateStatusForResult(outbound string, result *ProbeResult) {

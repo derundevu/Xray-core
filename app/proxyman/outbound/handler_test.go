@@ -3,10 +3,9 @@ package outbound_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/xtls/xray-core/app/policy"
 	"github.com/xtls/xray-core/app/proxyman"
@@ -87,89 +86,60 @@ func TestOutboundWithStatCounter(t *testing.T) {
 	}
 }
 
-func TestTagsCache(t *testing.T) {
-	test_duration := 10 * time.Second
-	threads_num := 50
-	delay := 10 * time.Millisecond
-	tags_prefix := "node"
+type selectorTestHandler struct {
+	outbound.Handler
+	tag string
+}
 
-	tags := sync.Map{}
-	counter := atomic.Uint64{}
+func (h *selectorTestHandler) Tag() string { return h.tag }
 
-	ohm, err := New(context.Background(), &proxyman.OutboundConfig{})
+func TestSelectionTracksAddedAndRemovedOutboundsDuringConcurrentReads(t *testing.T) {
+	manager, err := New(context.Background(), &proxyman.OutboundConfig{})
 	if err != nil {
-		t.Error("failed to create outbound handler manager")
+		t.Fatal(err)
 	}
-	config := &core.Config{
-		App: []*serial.TypedMessage{},
+	ctx := context.Background()
+	if err := manager.AddHandler(ctx, &selectorTestHandler{tag: "node.anchor"}); err != nil {
+		t.Fatal(err)
 	}
-	v, _ := core.New(config)
-	v.AddFeature(ohm)
-	ctx := context.WithValue(context.Background(), xrayKey, v)
-
-	stop_add_rm := false
-	wg_add_rm := sync.WaitGroup{}
-	addHandlers := func() {
-		defer wg_add_rm.Done()
-		for !stop_add_rm {
-			time.Sleep(delay)
-			idx := counter.Add(1)
-			tag := fmt.Sprintf("%s%d", tags_prefix, idx)
-			cfg := &core.OutboundHandlerConfig{
-				Tag:           tag,
-				ProxySettings: serial.ToTypedMessage(&freedom.Config{FinalRules: []*freedom.FinalRuleConfig{{Action: freedom.RuleAction_Allow}}}),
-			}
-			if h, err := NewHandler(ctx, cfg); err == nil {
-				if err := ohm.AddHandler(ctx, h); err == nil {
-					// t.Log("add handler:", tag)
-					tags.Store(tag, nil)
-				} else {
-					t.Error("failed to add handler:", tag)
+	done := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Go(func() {
+			for {
+				select {
+				case <-done:
+					return
+				default:
 				}
-			} else {
-				t.Error("failed to create handler:", tag)
-			}
-		}
-	}
-
-	rmHandlers := func() {
-		defer wg_add_rm.Done()
-		for !stop_add_rm {
-			time.Sleep(delay)
-			tags.Range(func(key interface{}, value interface{}) bool {
-				if _, ok := tags.LoadAndDelete(key); ok {
-					// t.Log("remove handler:", key)
-					ohm.RemoveHandler(ctx, key.(string))
-					return false
+				for _, tag := range manager.Select([]string{"node."}) {
+					if !strings.HasPrefix(tag, "node.") {
+						t.Errorf("unrelated outbound selected: %q", tag)
+						return
+					}
 				}
-				return true
-			})
+			}
+		})
+	}
+	defer func() {
+		close(done)
+		readers.Wait()
+	}()
+	for i := range 1000 {
+		tag := fmt.Sprintf("node.%d", i)
+		if err := manager.AddHandler(ctx, &selectorTestHandler{tag: tag}); err != nil {
+			t.Fatal(err)
+		}
+		current := manager.Select([]string{"node."})
+		if len(current) != 2 || (current[0] != tag && current[1] != tag) {
+			t.Fatalf("added outbound unavailable to balancer: %v", current)
+		}
+		if err := manager.RemoveHandler(ctx, tag); err != nil {
+			t.Fatal(err)
+		}
+		current = manager.Select([]string{"node."})
+		if len(current) != 1 || current[0] != "node.anchor" {
+			t.Fatalf("removed outbound remains selectable: %v", current)
 		}
 	}
-
-	selectors := []string{tags_prefix}
-	wg_get := sync.WaitGroup{}
-	stop_get := false
-	getTags := func() {
-		defer wg_get.Done()
-		for !stop_get {
-			time.Sleep(delay)
-			_ = ohm.Select(selectors)
-			// t.Logf("get tags: %v", tag)
-		}
-	}
-
-	for i := 0; i < threads_num; i++ {
-		wg_add_rm.Add(2)
-		go rmHandlers()
-		go addHandlers()
-		wg_get.Add(1)
-		go getTags()
-	}
-
-	time.Sleep(test_duration)
-	stop_add_rm = true
-	wg_add_rm.Wait()
-	stop_get = true
-	wg_get.Wait()
 }

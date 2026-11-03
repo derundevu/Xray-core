@@ -5,6 +5,7 @@ import (
 	goerrors "errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common"
@@ -31,6 +32,7 @@ type Server struct {
 	policyManager policy.Manager
 	cone          bool
 	httpServer    *http.Server
+	accounts      atomic.Pointer[map[string]string]
 }
 
 // NewServer creates a new Server object.
@@ -41,6 +43,7 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 		policyManager: v.GetFeature(policy.ManagerType()).(policy.Manager),
 		cone:          ctx.Value("cone").(bool),
 	}
+	s.ReplaceAccounts(config.Accounts)
 	httpConfig := &http.ServerConfig{
 		UserLevel: config.UserLevel,
 	}
@@ -49,6 +52,17 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 	}
 	s.httpServer, _ = http.NewServer(ctx, httpConfig)
 	return s, nil
+}
+
+// ReplaceAccounts publishes an immutable authentication snapshot. Existing SOCKS
+// sessions retain their identity; the mixed HTTP listener retains its original
+// immutable account set, including the unchanged default credentials.
+func (s *Server) ReplaceAccounts(accounts map[string]string) {
+	snapshot := make(map[string]string, len(accounts))
+	for username, password := range accounts {
+		snapshot[username] = password
+	}
+	s.accounts.Store(&snapshot)
 }
 
 func (s *Server) policy() policy.Session {
@@ -107,6 +121,7 @@ func (s *Server) processTCP(ctx context.Context, conn stat.Connection, dispatche
 
 	svrSession := &ServerSession{
 		config:       s.config,
+		accounts:     *s.accounts.Load(),
 		address:      inbound.Gateway.Address,
 		port:         inbound.Gateway.Port,
 		localAddress: net.IPAddress(conn.LocalAddr().(*net.TCPAddr).IP),

@@ -20,6 +20,17 @@ type BalancingPrincipleTarget interface {
 	GetPrincipleTarget([]string) []string
 }
 
+// BalancerCandidateSource supplies a precomputed immutable candidate set. Managed
+// sources never use the core's default outbound when their set is empty.
+type BalancerCandidateSource interface {
+	Candidates() []string
+}
+
+type ManagedBalancerCandidates struct {
+	Source    BalancerCandidateSource
+	RejectTag string
+}
+
 type RoundRobinStrategy struct {
 	FallbackTag string
 
@@ -83,10 +94,12 @@ func (s *RoundRobinStrategy) PickOutbound(tags []string) string {
 }
 
 type Balancer struct {
-	selectors   []string
-	strategy    BalancingStrategy
-	ohm         outbound.Manager
-	fallbackTag string
+	selectors       []string
+	strategy        BalancingStrategy
+	ohm             outbound.Manager
+	fallbackTag     string
+	candidateSource BalancerCandidateSource
+	rejectTag       string
 
 	override override
 }
@@ -100,6 +113,15 @@ func (b *Balancer) PickOutbound() (string, error) {
 			return b.fallbackTag, nil
 		}
 		return "", err
+	}
+	if b.candidateSource != nil {
+		if len(candidates) == 0 {
+			return b.rejectTag, nil
+		}
+		if tag := b.strategy.PickOutbound(candidates); tag != "" {
+			return tag, nil
+		}
+		return b.rejectTag, nil
 	}
 	var tag string
 	if o := b.override.Get(); o != "" {
@@ -126,6 +148,9 @@ func (b *Balancer) InjectContext(ctx context.Context) {
 
 // SelectOutbounds select outbounds with selectors of the Balancer
 func (b *Balancer) SelectOutbounds() ([]string, error) {
+	if b.candidateSource != nil {
+		return b.candidateSource.Candidates(), nil
+	}
 	hs, ok := b.ohm.(outbound.HandlerSelector)
 	if !ok {
 		return nil, errors.New("outbound.Manager is not a HandlerSelector")
@@ -152,6 +177,9 @@ func (r *Router) GetPrincipleTarget(tag string) ([]string, error) {
 // SetOverrideTarget implements routing.BalancerOverrider
 func (r *Router) SetOverrideTarget(tag, target string) error {
 	if b, ok := (*r.balancers.Load())[tag]; ok {
+		if b.candidateSource != nil {
+			return errors.New("managed availability candidates cannot be overridden")
+		}
 		b.override.Put(target)
 		return nil
 	}

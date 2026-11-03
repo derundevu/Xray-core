@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"maps"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -93,6 +94,24 @@ func (r *Router) AddRule(config *serial.TypedMessage, shouldAppend bool) error {
 }
 
 func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
+	return r.reloadRules(config, shouldAppend, "", nil)
+}
+
+// ReloadRulesWithFallback replaces the complete routing snapshot, including the
+// outbound used when no rule matches. Unlike a catch-all configured rule, this
+// fallback does not suppress the IPIfNonMatch DNS retry.
+func (r *Router) ReloadRulesWithFallback(config *Config, fallbackTag string) error {
+	return r.reloadRules(config, false, fallbackTag, nil)
+}
+
+// ReloadRulesWithCandidates atomically binds managed health candidate sources
+// together with their rules. Empty or failed sources have an explicit reject
+// outbound, never the default handler or an observatory fallback.
+func (r *Router) ReloadRulesWithCandidates(config *Config, fallbackTag string, managed map[string]ManagedBalancerCandidates) error {
+	return r.reloadRules(config, false, fallbackTag, managed)
+}
+
+func (r *Router) reloadRules(config *Config, shouldAppend bool, fallbackTag string, managed map[string]ManagedBalancerCandidates) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -101,11 +120,22 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
 
 	var newRules []*Rule
 	newBalancers := make(map[string]*Balancer)
+	var createdWebhooks []*Rule
+	committed := false
+	defer func() {
+		if !committed {
+			closeWebhooks(createdWebhooks)
+		}
+	}()
 	existTags := make(map[string]bool, len(oldRules)+len(config.Rule))
 	if shouldAppend {
-		newRules = append(newRules, oldRules...)
 		maps.Copy(newBalancers, oldBalancers)
 		for _, rule := range oldRules {
+			if rule.fallback {
+				fallbackTag = rule.Tag
+				continue
+			}
+			newRules = append(newRules, rule)
 			existTags[rule.RuleTag] = true
 		}
 	}
@@ -118,8 +148,23 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
 		if err != nil {
 			return err
 		}
+		if candidates, ok := managed[rule.Tag]; ok {
+			if candidates.Source == nil || candidates.RejectTag == "" || r.ohm.GetHandler(candidates.RejectTag) == nil {
+				return errors.New("managed balancer requires a source and explicit reject handler")
+			}
+			if rule.FallbackTag != "" || (!strings.EqualFold(rule.Strategy, "random") && !strings.EqualFold(rule.Strategy, "roundrobin")) {
+				return errors.New("managed candidates require an unobserved random or round-robin balancer")
+			}
+			balancer.candidateSource = candidates.Source
+			balancer.rejectTag = candidates.RejectTag
+		}
 		balancer.InjectContext(r.ctx)
 		newBalancers[rule.Tag] = balancer
+	}
+	for tag := range managed {
+		if newBalancers[tag] == nil {
+			return errors.New("managed candidates reference an unavailable balancer")
+		}
 	}
 
 	for _, rule := range config.Rule {
@@ -142,6 +187,7 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
 				return err
 			}
 			rr.Webhook = notifier
+			createdWebhooks = append(createdWebhooks, rr)
 		}
 		if btag := rule.GetBalancingTag(); len(btag) > 0 {
 			brule, found := newBalancers[btag]
@@ -152,9 +198,15 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
 		}
 		newRules = append(newRules, rr)
 	}
+	if fallbackTag != "" {
+		newRules = append(newRules, &Rule{
+			Tag: fallbackTag, Condition: NewConditionChan(), fallback: true,
+		})
+	}
 
 	r.balancers.Store(&newBalancers)
 	r.rules.Store(&newRules)
+	committed = true
 	if !shouldAppend {
 		closeWebhooks(oldRules)
 	}
@@ -190,6 +242,9 @@ func (r *Router) ListRule() []routing.Route {
 	rules := *r.rules.Load()
 	ruleList := make([]routing.Route, 0, len(rules))
 	for _, rule := range rules {
+		if rule.fallback {
+			continue
+		}
 		ruleList = append(ruleList, &Route{
 			outboundTag: rule.Tag,
 			ruleTag:     rule.RuleTag,
@@ -209,14 +264,22 @@ func (r *Router) pickRouteInternal(ctx routing.Context) (*Rule, routing.Context,
 	}
 
 	rules := *r.rules.Load()
+	var fallback *Rule
 
 	for _, rule := range rules {
+		if rule.fallback {
+			fallback = rule
+			break
+		}
 		if rule.Apply(ctx) {
 			return rule, ctx, nil
 		}
 	}
 
 	if r.domainStrategy != Config_IpIfNonMatch || len(ctx.GetTargetDomain()) == 0 || skipDNSResolve {
+		if fallback != nil {
+			return fallback, ctx, nil
+		}
 		return nil, ctx, common.ErrNoClue
 	}
 

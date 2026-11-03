@@ -26,6 +26,12 @@ func MustFromContext(ctx context.Context) *Instance {
 	return x
 }
 
+// Context returns the instance-bound context for managed extensions which need
+// the same feature lookup and transport settings as the core's own components.
+func (s *Instance) Context() context.Context {
+	return toContext(s.ctx, s)
+}
+
 /*
 	toContext returns ctx from the given context, or creates an Instance if the context doesn't find that.
 

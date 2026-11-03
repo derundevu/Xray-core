@@ -162,18 +162,26 @@ func (m *Manager) ListHandlers(ctx context.Context) []outbound.Handler {
 
 // Select implements outbound.HandlerSelector.
 func (m *Manager) Select(selectors []string) []string {
+	m.access.RLock()
+	defer m.access.RUnlock()
 	key := strings.Join(selectors, ",")
 	if cache, ok := m.tagsCache.Load(key); ok {
 		return cache.([]string)
 	}
 
-	m.access.RLock()
-	defer m.access.RUnlock()
-
 	tags := make([]string, 0, len(selectors))
 
-	for tag := range m.taggedHandler {
+	for tag, handler := range m.taggedHandler {
+		// Versioned live-routing handlers must not become candidates of an
+		// already-published prefix balancer before its replacement commits.
+		exactOnly := false
+		if handler, ok := handler.(interface{ ExactSelectorOnly() bool }); ok {
+			exactOnly = handler.ExactSelectorOnly()
+		}
 		for _, selector := range selectors {
+			if exactOnly && selector != tag {
+				continue
+			}
 			if strings.HasPrefix(tag, selector) {
 				tags = append(tags, tag)
 				break

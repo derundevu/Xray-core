@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common/errors"
@@ -46,52 +47,76 @@ func (c *Config) loadSelfCertPool() (*x509.CertPool, error) {
 	return root, nil
 }
 
-// BuildCertificates builds a list of TLS certificates from proto definition.
-func (c *Config) BuildCertificates() []*tls.Certificate {
-	certs := make([]*tls.Certificate, 0, len(c.Certificate))
+func loadX509KeyPair(entry *Certificate) *tls.Certificate {
+	keyPair, err := tls.X509KeyPair(entry.Certificate, entry.Key)
+	if err != nil {
+		errors.LogWarningInner(context.Background(), err, "ignoring invalid X509 key pair")
+		return nil
+	}
+	keyPair.Leaf, err = x509.ParseCertificate(keyPair.Certificate[0])
+	if err != nil {
+		errors.LogWarningInner(context.Background(), err, "ignoring invalid certificate")
+		return nil
+	}
+	return &keyPair
+}
+
+func refreshCertificate(current *atomic.Pointer[tls.Certificate], entry *Certificate, isReloaded, isOcspstapling bool) {
+	previous := current.Load()
+	next := previous
+	if isReloaded {
+		next = loadX509KeyPair(entry)
+		if next == nil {
+			return
+		}
+	}
+	if isOcspstapling {
+		if staple, err := ocsp.GetOCSPForCert(next.Certificate); err != nil {
+			errors.LogWarningInner(context.Background(), err, "ignoring invalid OCSP")
+		} else if !bytes.Equal(staple, next.OCSPStaple) {
+			if next == previous {
+				snapshot := *previous
+				next = &snapshot
+			}
+			next.OCSPStaple = staple
+		}
+	}
+	if next != previous {
+		current.Store(next)
+	}
+}
+
+// BuildCertificates publishes immutable TLS certificates through per-entry atomic slots.
+func (c *Config) BuildCertificates() []atomic.Pointer[tls.Certificate] {
+	certs := make([]atomic.Pointer[tls.Certificate], len(c.Certificate))
+	count := 0
 	for _, entry := range c.Certificate {
 		if entry.Usage != Certificate_ENCIPHERMENT {
 			continue
 		}
-		getX509KeyPair := func() *tls.Certificate {
-			keyPair, err := tls.X509KeyPair(entry.Certificate, entry.Key)
-			if err != nil {
-				errors.LogWarningInner(context.Background(), err, "ignoring invalid X509 key pair")
-				return nil
-			}
-			keyPair.Leaf, err = x509.ParseCertificate(keyPair.Certificate[0])
-			if err != nil {
-				errors.LogWarningInner(context.Background(), err, "ignoring invalid certificate")
-				return nil
-			}
-			return &keyPair
-		}
-		if keyPair := getX509KeyPair(); keyPair != nil {
-			certs = append(certs, keyPair)
-		} else {
+		keyPair := loadX509KeyPair(entry)
+		if keyPair == nil {
 			continue
 		}
-		index := len(certs) - 1
-		setupOcspTicker(entry, func(isReloaded, isOcspstapling bool) {
-			cert := certs[index]
-			if isReloaded {
-				if newKeyPair := getX509KeyPair(); newKeyPair != nil {
-					cert = newKeyPair
-				} else {
-					return
-				}
-			}
-			if isOcspstapling {
-				if newOCSPData, err := ocsp.GetOCSPForCert(cert.Certificate); err != nil {
-					errors.LogWarningInner(context.Background(), err, "ignoring invalid OCSP")
-				} else if string(newOCSPData) != string(cert.OCSPStaple) {
-					cert.OCSPStaple = newOCSPData
-				}
-			}
-			certs[index] = cert
+		current := &certs[count]
+		current.Store(keyPair)
+		count++
+		if entry.OneTimeLoading {
+			continue
+		}
+		// Each watcher owns its reload inputs; never mutate the shared proto config.
+		watched := &Certificate{
+			Certificate:     entry.Certificate,
+			Key:             entry.Key,
+			CertificatePath: entry.CertificatePath,
+			KeyPath:         entry.KeyPath,
+			OcspStapling:    entry.OcspStapling,
+		}
+		setupOcspTicker(watched, func(isReloaded, isOcspstapling bool) {
+			refreshCertificate(current, watched, isReloaded, isOcspstapling)
 		})
 	}
-	return certs
+	return certs[:count]
 }
 
 func setupOcspTicker(entry *Certificate, callback func(isReloaded, isOcspstapling bool)) {
@@ -106,6 +131,7 @@ func setupOcspTicker(entry *Certificate, callback func(isReloaded, isOcspstaplin
 			isOcspstapling = true
 		}
 		t := time.NewTicker(time.Duration(hotReloadCertInterval) * time.Second)
+		defer t.Stop()
 		for {
 			var isReloaded bool
 			if entry.CertificatePath != "" && entry.KeyPath != "" {
@@ -244,20 +270,21 @@ func getGetCertificateFunc(c *tls.Config, ca []*Certificate) func(hello *tls.Cli
 	}
 }
 
-func getNewGetCertificateFunc(certs []*tls.Certificate, rejectUnknownSNI bool) func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+func getNewGetCertificateFunc(certs []atomic.Pointer[tls.Certificate], rejectUnknownSNI bool) func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		if len(certs) == 0 {
 			return nil, errNoCertificates
 		}
 		sni := strings.ToLower(hello.ServerName)
 		if !rejectUnknownSNI && (len(certs) == 1 || sni == "") {
-			return certs[0], nil
+			return certs[0].Load(), nil
 		}
 		gsni := "*"
 		if index := strings.IndexByte(sni, '.'); index != -1 {
 			gsni += sni[index:]
 		}
-		for _, keyPair := range certs {
+		for index := range certs {
+			keyPair := certs[index].Load()
 			if keyPair.Leaf.Subject.CommonName == sni || keyPair.Leaf.Subject.CommonName == gsni {
 				return keyPair, nil
 			}
@@ -270,7 +297,7 @@ func getNewGetCertificateFunc(certs []*tls.Certificate, rejectUnknownSNI bool) f
 		if rejectUnknownSNI {
 			return nil, errNoCertificates
 		}
-		return certs[0], nil
+		return certs[0].Load(), nil
 	}
 }
 
