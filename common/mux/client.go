@@ -5,6 +5,7 @@ import (
 	goerrors "errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common"
@@ -152,7 +153,7 @@ func (f *DialingWorkerFactory) Create() (*ClientWorker, error) {
 		outbounds := []*session.Outbound{{
 			Target: net.TCPDestination(muxCoolAddress, muxCoolPort),
 		}}
-		ctx := session.ContextWithOutbounds(context.Background(), outbounds)
+		ctx := session.ContextWithOutbounds(session.ContextWithConnectionObservationDisabled(context.Background()), outbounds)
 		ctx, cancel := context.WithCancel(ctx)
 
 		if errP := p.Process(ctx, &transport.Link{Reader: uplinkReader, Writer: downlinkWriter}, d); errP != nil {
@@ -179,6 +180,7 @@ type ClientWorker struct {
 	done           *done.Instance
 	timer          *time.Ticker
 	strategy       ClientStrategy
+	closedByOwner  atomic.Bool
 }
 
 var (
@@ -220,6 +222,7 @@ func (m *ClientWorker) WaitClosed() <-chan struct{} {
 }
 
 func (m *ClientWorker) Close() error {
+	m.closedByOwner.Store(true)
 	return m.done.Close()
 }
 
@@ -231,7 +234,11 @@ func (m *ClientWorker) monitor() {
 		checkCount := m.sessionManager.Count()
 		select {
 		case <-m.done.Wait():
-			m.sessionManager.Close()
+			outcome := "error"
+			if m.closedByOwner.Load() {
+				outcome = "interrupted"
+			}
+			m.sessionManager.closeWithOutcome(outcome)
 			common.Interrupt(m.link.Writer)
 			common.Interrupt(m.link.Reader)
 			return
@@ -256,14 +263,13 @@ func writeFirstPayload(reader buf.Reader, writer *Writer) error {
 	return nil
 }
 
-func fetchInput(ctx context.Context, s *Session, output buf.Writer) {
+func fetchInput(ctx context.Context, s *Session, output buf.Writer, release func(string)) {
+	if release != nil {
+		defer release("closed")
+	}
 	outbounds := session.OutboundsFromContext(ctx)
 	ob := outbounds[len(outbounds)-1]
-	transferType := protocol.TransferTypeStream
-	if ob.Target.Network == net.Network_UDP {
-		transferType = protocol.TransferTypePacket
-	}
-	s.transferType = transferType
+	transferType := s.transferType
 	var inbound *session.Inbound
 	if session.IsReverseMuxFromContext(ctx) {
 		inbound = session.InboundFromContext(ctx)
@@ -274,12 +280,18 @@ func fetchInput(ctx context.Context, s *Session, output buf.Writer) {
 
 	errors.LogInfo(ctx, "dispatching request to ", ob.Target)
 	if err := writeFirstPayload(s.input, writer); err != nil {
+		if !s.done.Done() || !goerrors.Is(errors.Cause(err), io.ErrClosedPipe) {
+			session.RecordConnectionError(ctx, err)
+		}
 		errors.LogInfoInner(ctx, err, "failed to write first payload")
 		writer.hasError = true
 		return
 	}
 
 	if err := buf.Copy(s.input, writer); err != nil {
+		if !s.done.Done() || !goerrors.Is(errors.Cause(err), io.ErrClosedPipe) {
+			session.RecordConnectionError(ctx, err)
+		}
 		errors.LogInfoInner(ctx, err, "failed to fetch all input")
 		writer.hasError = true
 		return
@@ -314,11 +326,20 @@ func (m *ClientWorker) Dispatch(ctx context.Context, link *transport.Link) bool 
 	}
 
 	sm := m.sessionManager
-	s := sm.Allocate(&m.strategy, link.Reader, link.Writer)
+	release := session.RetainConnectionObservation(ctx)
+	transferType := protocol.TransferTypeStream
+	outbounds := session.OutboundsFromContext(ctx)
+	if outbounds[len(outbounds)-1].Target.Network == net.Network_UDP {
+		transferType = protocol.TransferTypePacket
+	}
+	s := sm.Allocate(&m.strategy, link.Reader, link.Writer, transferType, release)
 	if s == nil {
+		if release != nil {
+			release("closed")
+		}
 		return false
 	}
-	go fetchInput(ctx, s, m.link.Writer)
+	go fetchInput(ctx, s, m.link.Writer, session.RetainConnectionObservation(ctx))
 	if _, ok := link.Reader.(*pipe.Reader); !ok {
 		select {
 		case <-ctx.Done():
@@ -357,10 +378,14 @@ func (m *ClientWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.Buffere
 	}
 
 	rr := s.NewReader(reader, &meta.Target)
+	if !s.beginOutput() {
+		return buf.Copy(rr, buf.Discard)
+	}
+	defer s.endOutput()
 	err := buf.Copy(rr, s.output)
 	if err != nil && buf.IsWriteError(err) {
 		errors.LogInfoInner(context.Background(), err, "failed to write to downstream. closing session ", s.ID)
-		s.Close(false)
+		s.closeWithOutcome(false, "error")
 		return buf.Copy(rr, buf.Discard)
 	}
 
@@ -369,7 +394,11 @@ func (m *ClientWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.Buffere
 
 func (m *ClientWorker) handleStatusEnd(meta *FrameMetadata, reader *buf.BufferedReader) error {
 	if s, found := m.sessionManager.Get(meta.SessionID); found {
-		s.Close(false)
+		outcome := "closed"
+		if meta.Option.Has(OptionError) {
+			outcome = "error"
+		}
+		s.closeWithOutcome(false, outcome)
 	}
 	if meta.Option.Has(OptionData) {
 		return buf.Copy(NewStreamReader(reader), buf.Discard)

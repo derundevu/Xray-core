@@ -30,6 +30,7 @@ type TimeoutReader interface {
 
 type TimeoutWrapperReader struct {
 	Reader
+	Observe func(MultiBuffer)
 	stats.Counter
 	mb   MultiBuffer
 	err  error
@@ -43,11 +44,17 @@ func (r *TimeoutWrapperReader) ReadMultiBuffer() (MultiBuffer, error) {
 		if r.Counter != nil {
 			r.Counter.Add(int64(r.mb.Len()))
 		}
+		if r.Observe != nil {
+			r.Observe(r.mb)
+		}
 		return r.mb, r.err
 	}
 	r.mb, r.err = r.Reader.ReadMultiBuffer()
 	if r.Counter != nil {
 		r.Counter.Add(int64(r.mb.Len()))
+	}
+	if r.Observe != nil {
+		r.Observe(r.mb)
 	}
 	return r.mb, r.err
 }
@@ -71,6 +78,9 @@ func (r *TimeoutWrapperReader) ReadMultiBufferTimeout(duration time.Duration) (M
 		if r.Counter != nil {
 			r.Counter.Add(int64(r.mb.Len()))
 		}
+		if r.Observe != nil {
+			r.Observe(r.mb)
+		}
 		return r.mb, r.err
 	case <-timeout:
 		return nil, nil
@@ -85,10 +95,17 @@ type Writer interface {
 
 // WriteAllBytes ensures all bytes are written into the given writer.
 func WriteAllBytes(writer io.Writer, payload []byte, c stats.Counter) error {
+	return writeAllBytes(writer, payload, c, nil)
+}
+
+func writeAllBytes(writer io.Writer, payload []byte, c stats.Counter, observe func(int64)) error {
 	wc := 0
 	defer func() {
 		if c != nil {
 			c.Add(int64(wc))
+		}
+		if observe != nil {
+			observe(int64(wc))
 		}
 	}()
 

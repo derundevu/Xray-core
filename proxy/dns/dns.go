@@ -215,7 +215,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
 	}
 
 	if session.TimeoutOnlyFromContext(ctx) {
-		ctx = context.Background()
+		ctx = session.ConnectionObservationDetachedContext(ctx)
 	}
 
 	ctx, cancel := context.WithCancel(ctx)

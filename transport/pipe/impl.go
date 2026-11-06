@@ -38,6 +38,8 @@ type pipe struct {
 	errChan     chan error
 	option      pipeOption
 	state       state
+	onRead      func(buf.MultiBuffer)
+	onWrite     func(buf.MultiBuffer)
 }
 
 var (
@@ -85,6 +87,9 @@ func (p *pipe) readMultiBufferInternal() (buf.MultiBuffer, error) {
 
 	data := p.data
 	p.data = nil
+	if p.onRead != nil {
+		p.onRead(data)
+	}
 	return data, nil
 }
 
@@ -131,6 +136,9 @@ func (p *pipe) writeMultiBufferInternal(mb buf.MultiBuffer) error {
 
 	if err := p.getState(false); err != nil {
 		return err
+	}
+	if p.onWrite != nil {
+		p.onWrite(mb)
 	}
 
 	if p.data == nil {

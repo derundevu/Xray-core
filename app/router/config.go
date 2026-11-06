@@ -11,17 +11,25 @@ import (
 )
 
 type Rule struct {
-	Tag       string
-	RuleTag   string
-	Balancer  *Balancer
-	Condition Condition
-	Webhook   *WebhookNotifier
-	fallback  bool
+	Tag             string
+	RuleTag         string
+	Balancer        *Balancer
+	Condition       Condition
+	Webhook         *WebhookNotifier
+	fallback        bool
+	outboundAliases map[string]string
 }
 
 func (r *Rule) GetTag() (string, error) {
 	if r.Balancer != nil {
-		return r.Balancer.PickOutbound()
+		tag, err := r.Balancer.PickOutbound()
+		if err != nil {
+			return "", err
+		}
+		if alias := r.outboundAliases[tag]; alias != "" {
+			return alias, nil
+		}
+		return tag, nil
 	}
 	return r.Tag, nil
 }

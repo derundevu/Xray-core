@@ -217,6 +217,7 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 		if ob.Target.Network == net.Network_UDP && ob.Target.Port == 443 {
 			switch h.udp443 {
 			case "reject":
+				session.SetConnectionOutcome(ctx, "blocked")
 				test(errors.New("XUDP rejected UDP/443 traffic"))
 				return
 			case "skip":
@@ -237,6 +238,7 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 	}
 out:
 	err := h.proxy.Process(ctx, link, h)
+	session.RecordConnectionError(ctx, err)
 	var errC error
 	if err != nil {
 		errC = errors.Cause(err)

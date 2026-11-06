@@ -18,6 +18,7 @@ import (
 	dns_feature "github.com/xtls/xray-core/features/dns"
 	"github.com/xtls/xray-core/transport/internet/tls"
 	"golang.org/x/net/http2"
+	"google.golang.org/protobuf/proto"
 )
 
 // NextProtoDQ - During connection establishment, DNS/QUIC support is indicated
@@ -33,10 +34,11 @@ type QUICNameServer struct {
 	destination     *net.Destination
 	connection      *quic.Conn
 	clientIP        net.IP
+	security        *tls.Config
 }
 
 // NewQUICNameServer creates DNS-over-QUIC client object for local resolving
-func NewQUICNameServer(url *url.URL, disableCache bool, serveStale bool, serveExpiredTTL uint32, clientIP net.IP) (*QUICNameServer, error) {
+func NewQUICNameServer(url *url.URL, disableCache bool, serveStale bool, serveExpiredTTL uint32, clientIP net.IP, security *tls.Config) (*QUICNameServer, error) {
 	var err error
 	port := net.Port(853)
 	if url.Port() != "" {
@@ -46,11 +48,17 @@ func NewQUICNameServer(url *url.URL, disableCache bool, serveStale bool, serveEx
 		}
 	}
 	dest := net.UDPDestination(net.ParseAddress(url.Hostname()), port)
+	if security == nil {
+		security = &tls.Config{}
+	} else {
+		security = proto.Clone(security).(*tls.Config)
+	}
 
 	s := &QUICNameServer{
 		cacheController: NewCacheController(url.String(), disableCache, serveStale, serveExpiredTTL),
 		destination:     &dest,
 		clientIP:        clientIP,
+		security:        security,
 	}
 
 	errors.LogInfo(context.Background(), "DNS: created Local DNS-over-QUIC client for ", url.String())
@@ -258,12 +266,11 @@ func (s *QUICNameServer) getConnection() (*quic.Conn, error) {
 }
 
 func (s *QUICNameServer) openConnection() (*quic.Conn, error) {
-	tlsConfig := tls.Config{}
 	quicConfig := &quic.Config{
 		HandshakeIdleTimeout: handshakeTimeout,
 	}
-	tlsConfig.ServerName = s.destination.Address.String()
-	conn, err := quic.DialAddr(context.Background(), s.destination.NetAddr(), tlsConfig.GetTLSConfig(tls.WithNextProto("http/1.1", http2.NextProtoTLS, NextProtoDQ)), quicConfig)
+	conn, err := quic.DialAddr(context.Background(), s.destination.NetAddr(),
+		s.security.GetTLSConfig(tls.WithDestination(*s.destination), tls.WithNextProto("http/1.1", http2.NextProtoTLS, NextProtoDQ)), quicConfig)
 	log.Record(&log.AccessMessage{
 		From:   "DNS",
 		To:     s.destination,

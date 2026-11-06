@@ -63,7 +63,7 @@ func NewServer(ctx context.Context, dest net.Destination, dispatcher routing.Dis
 		case strings.EqualFold(u.Scheme, "h2c+local"): // DNS-over-HTTPS h2c Local mode
 			return NewDoHNameServer(u, nil, true, disableCache, serveStale, serveExpiredTTL, clientIP), nil
 		case strings.EqualFold(u.Scheme, "quic+local"): // DNS-over-QUIC Local mode
-			return NewQUICNameServer(u, disableCache, serveStale, serveExpiredTTL, clientIP)
+			return NewQUICNameServer(u, disableCache, serveStale, serveExpiredTTL, clientIP, nil)
 		case strings.EqualFold(u.Scheme, "tcp"): // DNS-over-TCP Remote mode
 			return NewTCPNameServer(u, dispatcher, disableCache, serveStale, serveExpiredTTL, clientIP)
 		case strings.EqualFold(u.Scheme, "tcp+local"): // DNS-over-TCP Local mode

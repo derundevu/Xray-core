@@ -62,12 +62,16 @@ func TestBlackholeCustomResponse(t *testing.T) {
 	reader, writer := pipe.New(pipe.WithoutSizeLimit())
 	var actual buf.MultiBuffer
 	var rerr error
+	readDone := make(chan struct{})
 	go func() {
 		actual, rerr = reader.ReadMultiBuffer()
+		close(readDone)
 	}()
 
 	link := transport.Link{Reader: reader, Writer: writer}
 	common.Must(handler.Process(ctx, &link, nil))
+	<-readDone
+	defer buf.ReleaseMulti(actual)
 	common.Must(rerr)
 
 	if actual.String() != string(expected) {

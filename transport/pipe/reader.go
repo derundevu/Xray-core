@@ -11,6 +11,12 @@ type Reader struct {
 	pipe *pipe
 }
 
+// SetReadObserver installs an application-boundary hook before the pipe is used.
+// It preserves the concrete Reader, including mux error feedback and timeouts.
+func (r *Reader) SetReadObserver(observer func(buf.MultiBuffer)) {
+	r.pipe.onRead = observer
+}
+
 // ReadMultiBuffer implements buf.Reader.
 func (r *Reader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 	return r.pipe.ReadMultiBuffer()

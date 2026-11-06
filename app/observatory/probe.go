@@ -50,6 +50,7 @@ func Probe(ctx context.Context, dispatcher routing.Dispatcher, outboundTag, prob
 // probeHTTP shares Observatory's tagged HTTP transport with the managed probe.
 // require2xx deliberately does not change stock Observatory's response semantics.
 func probeHTTP(ctx context.Context, dispatcher routing.Dispatcher, outboundTag, probeURL string, timeout time.Duration, require2xx bool) ProbeResult {
+	ctx = session.ContextWithConnectionObservationDisabled(ctx)
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

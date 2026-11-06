@@ -102,7 +102,7 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 	var newCtx context.Context
 	var newCancel context.CancelFunc
 	if session.TimeoutOnlyFromContext(ctx) {
-		newCtx, newCancel = context.WithCancel(context.Background())
+		newCtx, newCancel = context.WithCancel(session.ConnectionObservationDetachedContext(ctx))
 	}
 
 	sessionPolicy := o.policyManager.ForLevel(0)

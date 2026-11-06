@@ -93,11 +93,12 @@ func (r *cachedReader) Interrupt() {
 
 // DefaultDispatcher is a default implementation of Dispatcher.
 type DefaultDispatcher struct {
-	ohm    outbound.Manager
-	router routing.Router
-	policy policy.Manager
-	stats  stats.Manager
-	fdns   dns.FakeDNSEngine
+	ohm                outbound.Manager
+	router             routing.Router
+	policy             policy.Manager
+	stats              stats.Manager
+	fdns               dns.FakeDNSEngine
+	connectionObserver ConnectionObserver
 }
 
 func init() {
@@ -137,10 +138,14 @@ func (*DefaultDispatcher) Start() error {
 // Close implements common.Closable.
 func (*DefaultDispatcher) Close() error { return nil }
 
-func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link) {
+func (d *DefaultDispatcher) getLink(ctx context.Context, observation *session.ConnectionObservationHandle, network net.Network) (*transport.Link, *transport.Link) {
 	opt := pipe.OptionsFromContext(ctx)
 	uplinkReader, uplinkWriter := pipe.New(opt...)
 	downlinkReader, downlinkWriter := pipe.New(opt...)
+	if observation != nil {
+		uplinkWriter.SetWriteObserver(observeUpload(observation, network))
+		downlinkWriter.SetWriteObserver(observeDownload(observation, network))
+	}
 
 	inboundLink := &transport.Link{
 		Reader: downlinkReader,
@@ -268,6 +273,7 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 	if !destination.IsValid() {
 		panic("Dispatcher: Invalid destination.")
 	}
+	ctx, observation := d.openConnection(ctx, destination)
 	outbounds := session.OutboundsFromContext(ctx)
 	if len(outbounds) == 0 {
 		outbounds = []*session.Outbound{{}}
@@ -283,9 +289,9 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 	}
 
 	sniffingRequest := content.SniffingRequest
-	inbound, outbound := d.getLink(ctx)
+	inbound, outbound := d.getLink(ctx, observation, destination.Network)
 	if !sniffingRequest.Enabled {
-		go d.routedDispatch(ctx, outbound, destination)
+		go d.routedDispatch(ctx, outbound, destination, observation)
 	} else {
 		go func() {
 			cReader := &cachedReader{
@@ -314,7 +320,7 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 					ob.Target = destination
 				}
 			}
-			d.routedDispatch(ctx, outbound, destination)
+			d.routedDispatch(ctx, outbound, destination, observation)
 		}()
 	}
 	return inbound, nil
@@ -325,6 +331,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 	if !destination.IsValid() {
 		return errors.New("Dispatcher: Invalid destination.")
 	}
+	ctx, observation := d.openConnection(ctx, destination)
 	outbounds := session.OutboundsFromContext(ctx)
 	if len(outbounds) == 0 {
 		outbounds = []*session.Outbound{{}}
@@ -339,9 +346,12 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		ctx = session.ContextWithContent(ctx, content)
 	}
 	outbound = WrapLink(ctx, d.policy, d.stats, outbound)
+	if observation != nil {
+		observeLink(outbound, observation, destination.Network)
+	}
 	sniffingRequest := content.SniffingRequest
 	if !sniffingRequest.Enabled {
-		d.routedDispatch(ctx, outbound, destination)
+		d.routedDispatch(ctx, outbound, destination, observation)
 	} else {
 		cReader := &cachedReader{
 			reader: outbound.Reader.(buf.TimeoutReader),
@@ -369,7 +379,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 				ob.Target = destination
 			}
 		}
-		d.routedDispatch(ctx, outbound, destination)
+		d.routedDispatch(ctx, outbound, destination, observation)
 	}
 
 	return nil
@@ -431,7 +441,8 @@ func sniffer(ctx context.Context, cReader *cachedReader, metadataOnly bool, netw
 	return contentResult, contentErr
 }
 
-func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {
+func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination, observation *session.ConnectionObservationHandle) {
+	defer finishConnection(ctx, observation)
 	outbounds := session.OutboundsFromContext(ctx)
 	ob := outbounds[len(outbounds)-1]
 
@@ -448,6 +459,8 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 			handler = h
 		} else {
 			errors.LogError(ctx, "non existing tag for platform initialized detour: ", forcedOutboundTag)
+			observeRoute(ctx, forcedOutboundTag, ob.Target, destination)
+			session.SetConnectionOutcome(ctx, "error")
 			common.Close(link.Writer)
 			common.Interrupt(link.Reader)
 			return
@@ -465,6 +478,8 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 				handler = h
 			} else {
 				errors.LogWarning(ctx, "non existing outTag: ", outTag)
+				observeRoute(ctx, outTag, ob.Target, destination)
+				session.SetConnectionOutcome(ctx, "error")
 				common.Close(link.Writer)
 				common.Interrupt(link.Reader)
 				return // DO NOT CHANGE: the traffic shouldn't be processed by default outbound if the specified outbound tag doesn't exist (yet), e.g., VLESS Reverse Proxy
@@ -483,12 +498,14 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 
 	if handler == nil {
 		errors.LogInfo(ctx, "default outbound handler not exist")
+		session.SetConnectionOutcome(ctx, "error")
 		common.Close(link.Writer)
 		common.Interrupt(link.Reader)
 		return
 	}
 
 	ob.Tag = handler.Tag()
+	observeRoute(ctx, handler.Tag(), ob.Target, destination)
 	if accessMessage := log.AccessMessageFromContext(ctx); accessMessage != nil {
 		if tag := handler.Tag(); tag != "" {
 			if inTag == "" {

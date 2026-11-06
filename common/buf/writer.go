@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
@@ -14,12 +15,17 @@ import (
 type BufferToBytesWriter struct {
 	io.Writer
 
-	counter stats.Counter
-	cache   [][]byte
+	counter         stats.Counter
+	cache           [][]byte
+	observe         func(int64)
+	observeMetadata func(MultiBuffer)
 }
 
 // WriteMultiBuffer implements Writer. This method takes ownership of the given buffer.
 func (w *BufferToBytesWriter) WriteMultiBuffer(mb MultiBuffer) error {
+	if w.observeMetadata != nil {
+		w.observeMetadata(mb)
+	}
 	defer ReleaseMulti(mb)
 
 	size := mb.Len()
@@ -28,7 +34,7 @@ func (w *BufferToBytesWriter) WriteMultiBuffer(mb MultiBuffer) error {
 	}
 
 	if len(mb) == 1 {
-		return WriteAllBytes(w.Writer, mb[0].Bytes(), w.counter)
+		return writeAllBytes(w.Writer, mb[0].Bytes(), w.counter, w.observe)
 	}
 
 	if cap(w.cache) < len(mb) {
@@ -52,6 +58,9 @@ func (w *BufferToBytesWriter) WriteMultiBuffer(mb MultiBuffer) error {
 		if w.counter != nil {
 			w.counter.Add(wc)
 		}
+		if w.observe != nil {
+			w.observe(wc)
+		}
 	}()
 	for size > 0 {
 		n, err := nb.WriteTo(w.Writer)
@@ -65,6 +74,14 @@ func (w *BufferToBytesWriter) WriteMultiBuffer(mb MultiBuffer) error {
 	return nil
 }
 
+func (w *BufferToBytesWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if w.observe != nil {
+		w.observe(int64(n))
+	}
+	return n, err
+}
+
 // ReadFrom implements io.ReaderFrom.
 func (w *BufferToBytesWriter) ReadFrom(reader io.Reader) (int64, error) {
 	var sc SizeCounter
@@ -75,10 +92,14 @@ func (w *BufferToBytesWriter) ReadFrom(reader io.Reader) (int64, error) {
 // BufferedWriter is a Writer with internal buffer.
 type BufferedWriter struct {
 	sync.Mutex
-	writer    Writer
-	buffer    *Buffer
-	buffered  bool
-	flushNext bool
+	writer          Writer
+	buffer          *Buffer
+	buffered        bool
+	flushNext       bool
+	observeCount    func(int64)
+	observeMetadata func(MultiBuffer)
+	observeSkip     atomic.Int64
+	observeFailure  func()
 }
 
 // NewBufferedWriter creates a new BufferedWriter.
@@ -142,6 +163,9 @@ func (w *BufferedWriter) WriteMultiBuffer(b MultiBuffer) error {
 
 	w.Lock()
 	defer w.Unlock()
+	if w.observeMetadata != nil {
+		w.observeMetadata(b)
+	}
 
 	if !w.buffered {
 		return w.writer.WriteMultiBuffer(b)
@@ -181,13 +205,23 @@ func (w *BufferedWriter) Flush() error {
 	return w.flushInternal()
 }
 
-func (w *BufferedWriter) flushInternal() error {
+func (w *BufferedWriter) flushInternal() (flushErr error) {
 	if w.buffer.IsEmpty() {
 		return nil
 	}
 
 	b := w.buffer
 	w.buffer = nil
+	if w.observeCount != nil {
+		// Failed flushes relinquish their buffer, including any unwritten
+		// pre-analytics prefix. Successful nested buffering retains that prefix
+		// until the underlying writer reports its actual delivered bytes.
+		defer func() {
+			if flushErr != nil {
+				w.observedWriteFailed()
+			}
+		}()
+	}
 
 	if writer, ok := w.writer.(io.Writer); ok {
 		err := WriteAllBytes(writer, b.Bytes(), nil)
@@ -196,6 +230,26 @@ func (w *BufferedWriter) flushInternal() error {
 	}
 
 	return w.writer.WriteMultiBuffer(MultiBuffer{b})
+}
+
+func (w *BufferedWriter) observeDelivered(n int64) {
+	for {
+		skip := w.observeSkip.Load()
+		take := min(n, skip)
+		if take == 0 || w.observeSkip.CompareAndSwap(skip, skip-take) {
+			if n > take {
+				w.observeCount(n - take)
+			}
+			return
+		}
+	}
+}
+
+func (w *BufferedWriter) observedWriteFailed() {
+	w.observeSkip.Store(0)
+	if w.observeFailure != nil {
+		w.observeFailure()
+	}
 }
 
 // SetBuffered sets whether the internal buffer is used. If set to false, Flush() will be called to clear the buffer.
@@ -239,13 +293,30 @@ func (w *BufferedWriter) Close() error {
 // SequentialWriter is a Writer that writes MultiBuffer sequentially into the underlying io.Writer.
 type SequentialWriter struct {
 	io.Writer
+	observe         func(int64)
+	observeMetadata func(MultiBuffer)
 }
 
 // WriteMultiBuffer implements Writer.
 func (w *SequentialWriter) WriteMultiBuffer(mb MultiBuffer) error {
-	mb, err := WriteMultiBuffer(w.Writer, mb)
+	if w.observeMetadata != nil {
+		w.observeMetadata(mb)
+	}
+	writer := w.Writer
+	if w.observe != nil {
+		writer = w
+	}
+	mb, err := WriteMultiBuffer(writer, mb)
 	ReleaseMulti(mb)
 	return err
+}
+
+func (w *SequentialWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if w.observe != nil {
+		w.observe(int64(n))
+	}
+	return n, err
 }
 
 type noOpWriter byte

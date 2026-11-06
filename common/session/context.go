@@ -120,6 +120,7 @@ type TrackedRequestErrorFeedback interface {
 }
 
 func SubmitOutboundErrorToOriginator(ctx context.Context, err error) {
+	RecordConnectionError(ctx, err)
 	if errorTracker := ctx.Value(trackedConnectionErrorKey); errorTracker != nil {
 		errorTracker := errorTracker.(TrackedRequestErrorFeedback)
 		errorTracker.SubmitError(err)

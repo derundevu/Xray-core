@@ -227,11 +227,16 @@ func (h *Handler) blockDelay(rule *FinalRule) time.Duration {
 }
 
 func (h *Handler) blackhole(ctx context.Context, input buf.Reader, output buf.Writer, rule *FinalRule, dest *net.Destination) error {
+	session.SetConnectionOutcome(ctx, "blocked")
 	delay := h.blockDelay(rule)
 	errors.LogInfo(ctx, "blocked target: ", *dest, ", blackholing connection for ", delay)
 	defer common.Close(output)
 	done := make(chan struct{})
+	release := session.RetainConnectionObservation(ctx)
 	go func() { // a DispatchLink inbound's reader ignores Interrupt, so don't wait for this copy
+		if release != nil {
+			defer release("closed")
+		}
 		_ = buf.Copy(input, buf.Discard)
 		close(done)
 	}()
@@ -380,7 +385,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	var newCtx context.Context
 	var newCancel context.CancelFunc
 	if session.TimeoutOnlyFromContext(ctx) {
-		newCtx, newCancel = context.WithCancel(context.Background())
+		newCtx, newCancel = context.WithCancel(session.ConnectionObservationDetachedContext(ctx))
 	}
 
 	plcy := h.policy()

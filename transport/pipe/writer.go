@@ -9,6 +9,12 @@ type Writer struct {
 	pipe *pipe
 }
 
+// SetWriteObserver installs a hook for accepted writes, not discarded overflow.
+// Call before the pipe is used. The callback must not block or retain buffers.
+func (w *Writer) SetWriteObserver(observer func(buf.MultiBuffer)) {
+	w.pipe.onWrite = observer
+}
+
 // WriteMultiBuffer implements buf.Writer.
 func (w *Writer) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	return w.pipe.WriteMultiBuffer(mb)

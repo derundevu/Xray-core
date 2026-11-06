@@ -124,7 +124,13 @@ func redirect(ctx context.Context, dst net.Destination, obt string, h outbound.H
 	if !session.CancellationPropagationFromContext(ctx) {
 		dispatchCtx = context.WithoutCancel(ctx)
 	}
-	go h.Dispatch(dispatchCtx, &transport.Link{Reader: ur, Writer: dw})
+	release := session.RetainConnectionObservation(dispatchCtx)
+	go func() {
+		if release != nil {
+			defer release("closed")
+		}
+		h.Dispatch(dispatchCtx, &transport.Link{Reader: ur, Writer: dw})
+	}()
 	var readerOpt cnc.ConnectionOption
 	if dst.Network == net.Network_TCP {
 		readerOpt = cnc.ConnectionOutputMulti(dr)

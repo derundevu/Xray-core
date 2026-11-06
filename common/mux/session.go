@@ -5,6 +5,7 @@ import (
 	"io"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common"
@@ -51,7 +52,7 @@ func (m *SessionManager) Count() int {
 	return int(m.count)
 }
 
-func (m *SessionManager) Allocate(Strategy *ClientStrategy, input buf.Reader, output buf.Writer) *Session {
+func (m *SessionManager) Allocate(Strategy *ClientStrategy, input buf.Reader, output buf.Writer, transferType protocol.TransferType, onClose func(string)) *Session {
 	m.Lock()
 	defer m.Unlock()
 
@@ -64,11 +65,13 @@ func (m *SessionManager) Allocate(Strategy *ClientStrategy, input buf.Reader, ou
 
 	m.count++
 	s := &Session{
-		input:  input,
-		output: output,
-		ID:     m.count,
-		parent: m,
-		done:   done.New(),
+		input:        input,
+		output:       output,
+		ID:           m.count,
+		parent:       m,
+		done:         done.New(),
+		onClose:      onClose,
+		transferType: transferType,
 	}
 	m.sessions[s.ID] = s
 	return s
@@ -138,6 +141,10 @@ func (m *SessionManager) CloseIfNoSessionAndIdle(checkSize int, checkCount int) 
 }
 
 func (m *SessionManager) Close() error {
+	return m.closeWithOutcome("interrupted")
+}
+
+func (m *SessionManager) closeWithOutcome(outcome string) error {
 	m.Lock()
 	defer m.Unlock()
 
@@ -148,7 +155,7 @@ func (m *SessionManager) Close() error {
 	m.closed = true
 
 	for _, s := range m.sessions {
-		s.Close(true)
+		s.closeWithOutcome(true, outcome)
 	}
 
 	m.sessions = nil
@@ -157,18 +164,27 @@ func (m *SessionManager) Close() error {
 
 // Session represents a client connection in a Mux connection.
 type Session struct {
-	input        buf.Reader
-	output       buf.Writer
-	parent       *SessionManager
-	ID           uint16
-	transferType protocol.TransferType
-	closed       bool
-	done         *done.Instance
-	XUDP         *XUDP
+	input           buf.Reader
+	output          buf.Writer
+	parent          *SessionManager
+	ID              uint16
+	transferType    protocol.TransferType
+	closed          bool
+	done            *done.Instance
+	XUDP            *XUDP
+	onClose         func(string)
+	activeOutput    atomic.Int32
+	outputClosing   atomic.Bool
+	closeOutcome    string
+	observationOnce sync.Once
 }
 
 // Close closes all resources associated with this session.
 func (s *Session) Close(locked bool) error {
+	return s.closeWithOutcome(locked, "closed")
+}
+
+func (s *Session) closeWithOutcome(locked bool, outcome string) error {
 	if !locked {
 		s.parent.Lock()
 		defer s.parent.Unlock()
@@ -200,7 +216,36 @@ func (s *Session) Close(locked bool) error {
 		XUDPManager.Unlock()
 	}
 	s.parent.Remove(locked, s.ID)
+	s.closeOutcome = outcome
+	s.outputClosing.Store(true)
+	if s.activeOutput.Load() == 0 {
+		s.completeObservation()
+	}
 	return nil
+}
+
+// Delay completion until concurrent output writes return, without retaining
+// frame buffers or changing pipe interruption and half-close behavior.
+func (s *Session) beginOutput() bool {
+	s.parent.Lock()
+	defer s.parent.Unlock()
+	if s.closed {
+		return false
+	}
+	s.activeOutput.Add(1)
+	return true
+}
+func (s *Session) endOutput() {
+	if s.activeOutput.Add(-1) == 0 && s.outputClosing.Load() {
+		s.completeObservation()
+	}
+}
+func (s *Session) completeObservation() {
+	s.observationOnce.Do(func() {
+		if s.onClose != nil {
+			s.onClose(s.closeOutcome)
+		}
+	})
 }
 
 // NewReader creates a buf.Reader based on the transfer type of this Session.

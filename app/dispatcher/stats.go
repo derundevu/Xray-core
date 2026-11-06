@@ -11,6 +11,10 @@ type SizeStatWriter struct {
 	Writer  buf.Writer
 }
 
+// ObservationWriter exposes a transparent writer slot for pre-use byte hooks.
+// Statistics do not transform application bytes, including partial writes.
+func (w *SizeStatWriter) ObservationWriter() *buf.Writer { return &w.Writer }
+
 func (w *SizeStatWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	w.Counter.Add(int64(mb.Len()))
 	return w.Writer.WriteMultiBuffer(mb)

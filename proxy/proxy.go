@@ -729,7 +729,14 @@ func UnwrapRawConn(conn net.Conn) (net.Conn, stats.Counter, stats.Counter) {
 // CopyRawConnIfExist use the most efficient copy method.
 // - If caller don't want to turn on splice, do not pass in both reader conn and writer conn
 // - writer are from *transport.Link
-func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net.Conn, writer buf.Writer, timer *signal.ActivityTimer, inTimer *signal.ActivityTimer) error {
+func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net.Conn, writer buf.Writer, timer *signal.ActivityTimer, inTimer *signal.ActivityTimer) (copyErr error) {
+	release := session.RetainConnectionObservation(ctx)
+	if release != nil {
+		defer func() {
+			session.RecordConnectionError(ctx, copyErr)
+			release("closed")
+		}()
+	}
 	readerConn, readCounter, _ := UnwrapRawConn(readerConn)
 	writerConn, _, writeCounter := UnwrapRawConn(writerConn)
 	reader := buf.NewReader(readerConn)
@@ -771,7 +778,15 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 			if inTimer != nil {
 				inTimer.SetTimeout(24 * time.Hour)
 			}
+			observation := session.ConnectionObservationFromContext(ctx)
+			if observation != nil {
+				observation.SetDownloadDeferred(true)
+			}
 			w, err := tc.ReadFrom(readerConn)
+			if observation != nil {
+				observation.AddDownload(w)
+				observation.SetDownloadDeferred(false)
+			}
 			if readCounter != nil {
 				readCounter.Add(w) // outbound stats
 			}

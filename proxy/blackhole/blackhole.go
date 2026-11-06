@@ -59,6 +59,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	outbounds := session.OutboundsFromContext(ctx)
 	ob := outbounds[len(outbounds)-1]
 	ob.Name = "blackhole"
+	session.SetConnectionOutcome(ctx, "blocked")
 
 	if len(h.response) > 0 {
 		mbc := buf.MultiBufferContainer{}
@@ -75,7 +76,13 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		timer := signal.CancelAfterInactivity(ctx, func() {
 			cancel()
 		}, time.Duration(30+dice.Roll(61))*time.Second)
-		go buf.Copy(link.Reader, buf.Discard, buf.UpdateActivity(timer))
+		release := session.RetainConnectionObservation(ctx)
+		go func() {
+			if release != nil {
+				defer release("closed")
+			}
+			buf.Copy(link.Reader, buf.Discard, buf.UpdateActivity(timer))
+		}()
 		<-ctx.Done()
 	}
 	return nil

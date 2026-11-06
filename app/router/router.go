@@ -94,24 +94,24 @@ func (r *Router) AddRule(config *serial.TypedMessage, shouldAppend bool) error {
 }
 
 func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
-	return r.reloadRules(config, shouldAppend, "", nil)
+	return r.reloadRules(config, shouldAppend, "", nil, nil)
 }
 
 // ReloadRulesWithFallback replaces the complete routing snapshot, including the
 // outbound used when no rule matches. Unlike a catch-all configured rule, this
 // fallback does not suppress the IPIfNonMatch DNS retry.
 func (r *Router) ReloadRulesWithFallback(config *Config, fallbackTag string) error {
-	return r.reloadRules(config, false, fallbackTag, nil)
+	return r.reloadRules(config, false, fallbackTag, nil, nil)
 }
 
 // ReloadRulesWithCandidates atomically binds managed health candidate sources
 // together with their rules. Empty or failed sources have an explicit reject
 // outbound, never the default handler or an observatory fallback.
-func (r *Router) ReloadRulesWithCandidates(config *Config, fallbackTag string, managed map[string]ManagedBalancerCandidates) error {
-	return r.reloadRules(config, false, fallbackTag, managed)
+func (r *Router) ReloadRulesWithCandidates(config *Config, fallbackTag string, managed map[string]ManagedBalancerCandidates, aliases map[string]string) error {
+	return r.reloadRules(config, false, fallbackTag, managed, aliases)
 }
 
-func (r *Router) reloadRules(config *Config, shouldAppend bool, fallbackTag string, managed map[string]ManagedBalancerCandidates) error {
+func (r *Router) reloadRules(config *Config, shouldAppend bool, fallbackTag string, managed map[string]ManagedBalancerCandidates, aliases map[string]string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -121,6 +121,9 @@ func (r *Router) reloadRules(config *Config, shouldAppend bool, fallbackTag stri
 	var newRules []*Rule
 	newBalancers := make(map[string]*Balancer)
 	var createdWebhooks []*Rule
+	// Balancers keep logical tags for observatory lookup, but dispatch must use
+	// the immutable physical identity belonging to this exact rule snapshot.
+	outboundAliases := maps.Clone(aliases)
 	committed := false
 	defer func() {
 		if !committed {
@@ -173,9 +176,10 @@ func (r *Router) reloadRules(config *Config, shouldAppend bool, fallbackTag stri
 			return err
 		}
 		rr := &Rule{
-			Condition: cond,
-			Tag:       rule.GetTag(),
-			RuleTag:   rule.GetRuleTag(),
+			Condition:       cond,
+			Tag:             rule.GetTag(),
+			RuleTag:         rule.GetRuleTag(),
+			outboundAliases: outboundAliases,
 		}
 		if rr.RuleTag != "" && existTags[rr.RuleTag] {
 			return errors.New("duplicate ruleTag ", rr.RuleTag)
