@@ -45,6 +45,12 @@ func TestEnvFlag(t *testing.T) {
 }
 
 func TestGetAssetLocation(t *testing.T) {
+	// Test the default independently of inherited asset directories.
+	for _, name := range []string{AssetLocation, NormalizeEnvName(AssetLocation)} {
+		t.Setenv(name, "")
+		common.Must(os.Unsetenv(name))
+	}
+
 	exec, err := os.Executable()
 	common.Must(err)
 
@@ -53,7 +59,13 @@ func TestGetAssetLocation(t *testing.T) {
 		t.Error("asset dir: ", loc, " not in ", exec)
 	}
 
-	os.Setenv("xray.location.asset", "/xray")
+	assetDir := t.TempDir()
+	t.Setenv(NormalizeEnvName(AssetLocation), assetDir)
+	if v := GetAssetLocation("t"); v != filepath.Join(assetDir, "t") {
+		t.Error("asset loc: ", v)
+	}
+
+	t.Setenv(AssetLocation, "/xray")
 	if runtime.GOOS == "windows" {
 		if v := GetAssetLocation("t"); v != "\\xray\\t" {
 			t.Error("asset loc: ", v)
