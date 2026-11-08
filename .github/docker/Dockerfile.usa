@@ -1,16 +1,21 @@
-# syntax=docker/dockerfile:latest
-FROM --platform=$BUILDPLATFORM golang:latest AS build
+# syntax=docker/dockerfile:1
+ARG GO_VERSION
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS build
 
 # Build xray-core
 WORKDIR /src
 COPY . .
 ARG TARGETOS
 ARG TARGETARCH
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 go build -o xray -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags "-s -w -buildid=" ./main
+ARG TARGETVARIANT
+ARG BUILD_COMMIT
+RUN if [ "$TARGETARCH" = arm ]; then export GOARM="${TARGETVARIANT#v}"; fi; \
+    GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 GOTOOLCHAIN=local \
+    go build -o xray -trimpath -buildvcs=false -gcflags="all=-l=4" \
+    -ldflags "-s -w -buildid= -X github.com/xtls/xray-core/core.build=$(printf '%.7s' "$BUILD_COMMIT")" ./main
 
-# Download geodat into a staging directory
-ADD https://raw.githubusercontent.com/XTLS/Xray-rules-dat/release/geoip/geoip-full.dat /tmp/geodat/geoip.dat
-ADD https://raw.githubusercontent.com/XTLS/Xray-rules-dat/release/geosite/geosite-expand.dat /tmp/geodat/geosite.dat
+# Use the same resource snapshot as the release archives.
+COPY resources/docker/geoip.dat resources/docker/geosite.dat /tmp/geodat/
 
 RUN mkdir -p /tmp/empty
 
@@ -40,17 +45,23 @@ RUN echo '{}' >/tmp/usr/local/etc/xray/11_geodata.json
 RUN echo '{}' >/tmp/usr/local/etc/xray/12_env.json
 RUN echo '{}' >/tmp/usr/local/etc/xray/99_version.json
 
-# Build finally image
-# Note on Distroless Base Image and Architecture Support:
-# - The official 'gcr.io/distroless/static' image provided by Google only supports a limited set of architectures for Linux:
-#   - linux/amd64
-#   - linux/arm/v7
-#   - linux/arm64/v8
-#   - linux/ppc64le
-#   - linux/s390x
-# - Upon inspection, the blob contents of the Distroless images across these architectures are nearly identical, with only minor differences in metadata (e.g., 'Architecture' field in the manifest).
-# - Due to this similarity in content, it is feasible to forcibly specify a single platform (e.g., '--platform=linux/amd64') for unsupported architectures, as the core image content remains compatible with statically compiled binaries like Go applications.
-FROM --platform=linux/amd64 gcr.io/distroless/static:nonroot
+# Reuse the architecture-independent distroless filesystem on unsupported platforms.
+# A target-platform scratch stage keeps the output image's architecture and variant
+# correct instead of inheriting amd64 metadata from the filesystem donor.
+FROM --platform=linux/amd64 gcr.io/distroless/static:nonroot AS runtime
+FROM scratch
+COPY --from=runtime / /
+USER 65532
+WORKDIR /home/nonroot
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+ARG BUILD_COMMIT
+ARG VERSION
+ARG SOURCE
+LABEL org.opencontainers.image.version=$VERSION \
+      org.opencontainers.image.revision=$BUILD_COMMIT \
+      org.opencontainers.image.source=$SOURCE
 
 COPY --from=build --chown=0:0 --chmod=755 /src/xray /usr/local/bin/xray
 COPY --from=build --chown=65532:65532 --chmod=755 /tmp/empty /usr/local/share/xray

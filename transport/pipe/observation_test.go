@@ -56,6 +56,7 @@ func TestPipeObservationKeepsPacketsAndErrorFeedback(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
 func TestPipeObservationExcludesDiscardedAndFailedWrites(t *testing.T) {
 	r, w := pipe.New(pipe.WithSizeLimit(0), pipe.DiscardOverflow())
 	defer r.Interrupt()

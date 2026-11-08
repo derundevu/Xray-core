@@ -235,11 +235,13 @@ func (s *Session) beginOutput() bool {
 	s.activeOutput.Add(1)
 	return true
 }
+
 func (s *Session) endOutput() {
 	if s.activeOutput.Add(-1) == 0 && s.outputClosing.Load() {
 		s.completeObservation()
 	}
 }
+
 func (s *Session) completeObservation() {
 	s.observationOnce.Do(func() {
 		if s.onClose != nil {

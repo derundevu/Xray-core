@@ -1,184 +1,86 @@
-name: Build and Release for Windows 7
+name: Build Windows 7 packages
 
 on:
-  workflow_dispatch:
-  release:
-    types: [published]
-  push:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  workflow_call:
+    inputs:
+      commit:
+        type: string
+        required: true
+      go-version:
+        type: string
+        required: true
+      resources-artifact:
+        type: string
+        required: true
+
+permissions:
+  contents: read
 
 jobs:
-  check-assets:
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
-    steps:
-      - name: Restore Geodat Cache
-        uses: actions/cache/restore@v6
-        with:
-          path: resources
-          key: xray-geodat-
-
-      - name: Restore Wintun Cache
-        uses: actions/cache/restore@v6
-        with:
-          path: resources
-          key: xray-wintun-
-
-      - name: Check Assets Existence
-        id: check-assets
-        run: |
-          [ -d 'resources' ] || mkdir resources
-          LIST=('geoip.dat' 'geosite.dat')
-          for FILE_NAME in "${LIST[@]}"
-          do
-            echo -e "Checking ${FILE_NAME}..."
-            if [ -s "./resources/${FILE_NAME}" ]; then
-              echo -e "${FILE_NAME} exists."
-            else
-              echo -e "${FILE_NAME} does not exist."
-              echo "missing=true" >> $GITHUB_OUTPUT
-              break
-            fi
-          done
-          LIST=('amd64' 'x86')
-          for ARCHITECTURE in "${LIST[@]}"
-          do
-            echo -e "Checking wintun.dll for ${ARCHITECTURE}..."
-            if [ -s "./resources/wintun/bin/${ARCHITECTURE}/wintun.dll" ]; then
-              echo -e "wintun.dll for ${ARCHITECTURE} exists."
-            else
-              echo -e "wintun.dll for ${ARCHITECTURE} is missing."
-              echo "missing=true" >> $GITHUB_OUTPUT
-              break
-            fi
-          done
-
-      - name: Sleep for 90 seconds if Assets Missing
-        if: steps.check-assets.outputs.missing == 'true'
-        run: sleep 90
-
   build:
-    needs: check-assets
-    permissions:
-      contents: write
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
-          # BEGIN Windows 7
-          - goos: windows
-            goarch: amd64
+          - goarch: amd64
             assetname: win7-64
-          - goos: windows
-            goarch: 386
+          - goarch: '386'
             assetname: win7-32
-          # END Windows 7
-      fail-fast: false
-
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
     env:
-      GOOS: ${{ matrix.goos}}
+      GOOS: windows
       GOARCH: ${{ matrix.goarch }}
-      CGO_ENABLED: 0
+      CGO_ENABLED: '0'
+      GOTOOLCHAIN: local
+      ASSET_NAME: ${{ matrix.assetname }}
+    defaults:
+      run:
+        shell: bash
     steps:
-      - name: Checkout codebase
-        uses: actions/checkout@v7
-
-      - name: Show workflow information
-        run: |
-          _NAME=${{ matrix.assetname }}
-          echo "GOOS: ${{ matrix.goos }}, GOARCH: ${{ matrix.goarch }}, RELEASE_NAME: $_NAME"
-          echo "ASSET_NAME=$_NAME" >> $GITHUB_ENV
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
+      - uses: actions/checkout@v7
         with:
-          go-version-file: go.mod
-          check-latest: true
-
-      - name: Setup patched builder
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ inputs.go-version }}
+      - name: Install version-matched patched Windows 7 toolchain
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_GO: ${{ inputs.go-version }}
         run: |
-          GOSDK=$(go env GOROOT)
-          rm -r $GOSDK/*
-          cd $GOSDK
-          curl -O -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://github.com/XTLS/go-win7/releases/latest/download/go-for-win7-linux-amd64.zip
-          unzip ./go-for-win7-linux-amd64.zip -d $GOSDK
-          rm ./go-for-win7-linux-amd64.zip
-
-      - name: Get project dependencies
-        run: go mod download
-
+          set -euo pipefail
+          release=$(gh api "repos/XTLS/go-win7/releases/tags/patched-${EXPECTED_GO}")
+          asset=$(jq -cer '[.assets[] | select(.name == "go-for-win7-linux-amd64.zip")] | if length == 1 then .[0] else error("missing patched Go asset") end' <<< "$release")
+          url=$(jq -r .browser_download_url <<< "$asset")
+          curl --fail --show-error --location "$url" -o "$RUNNER_TEMP/go-win7.zip"
+          digest=$(jq -r '.digest // empty' <<< "$asset")
+          if [[ -n "$digest" ]]; then
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            printf '%s  %s\n' "${digest#sha256:}" "$RUNNER_TEMP/go-win7.zip" | sha256sum --check --strict
+          fi
+          goroot="$RUNNER_TEMP/go-win7"
+          mkdir -p "$goroot"
+          unzip -q "$RUNNER_TEMP/go-win7.zip" -d "$goroot"
+          actual=$(GOROOT="$goroot" "$goroot/bin/go" env GOVERSION)
+          [[ "$actual" == "go$EXPECTED_GO" ]] || { echo "Patched Windows 7 toolchain $actual does not match go$EXPECTED_GO" >&2; exit 1; }
+          echo "GOROOT=$goroot" >> "$GITHUB_ENV"
+          echo "$goroot/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.resources-artifact }}
+          path: resources
       - name: Build Xray
         run: |
+          set -euo pipefail
           mkdir -p build_assets
-          COMMID=$(git describe --always --dirty)
-          echo 'Building Xray for Windows 7...'
-          go build -o build_assets/xray.exe -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
-          # The line below is for without running conhost.exe version. Commented for not being used. Provided for reference.
-          # go build -o build_assets/wxray.exe -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-H windowsgui -X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
-
-      - name: Restore Geodat Cache
-        uses: actions/cache/restore@v6
+          commit=$(git rev-parse --short=7 HEAD)
+          go build -o build_assets/xray.exe -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=$commit -s -w -buildid=" -v ./main
+      - name: Package archive and digests
+        run: bash .github/build/package-release.sh
+      - uses: actions/upload-artifact@v7
         with:
-          path: resources
-          key: xray-geodat-
-
-      - name: Restore Wintun Cache
-        uses: actions/cache/restore@v6
-        with:
-          path: resources
-          key: xray-wintun-
-
-      - name: Add additional assets into package
-        run: |
-          mv -f resources/geo* build_assets/
-          if [[ ${GOOS} == 'windows' ]]; then
-            cp .github/build/windows/* build_assets/
-          fi
-          if [[ ${GOOS} == 'windows' ]]; then
-            echo 'Adding Wintun into packages'
-            if [[ ${GOARCH} == 'amd64' ]]; then
-              mv resources/wintun/bin/amd64/wintun.dll build_assets/
-            fi
-            if [[ ${GOARCH} == '386' ]]; then
-              mv resources/wintun/bin/x86/wintun.dll build_assets/
-            fi
-            mv resources/wintun/LICENSE.txt build_assets/LICENSE-Wintun
-          fi
-
-      - name: Copy README.md & LICENSE
-        run: |
-          cp ${GITHUB_WORKSPACE}/README.md ./build_assets/README.md
-          cp ${GITHUB_WORKSPACE}/LICENSE ./build_assets/LICENSE
-
-      - name: Create ZIP archive
-        if: github.event_name == 'release'
-        shell: bash
-        run: |
-          pushd build_assets || exit 1
-          touch -mt $(date +%Y01010000) *
-          zip -9vr ../Xray-${{ env.ASSET_NAME }}.zip .
-          popd || exit 1
-          FILE=./Xray-${{ env.ASSET_NAME }}.zip
-          DGST=$FILE.dgst
-          for METHOD in {"md5","sha1","sha256","sha512"}
-          do
-            openssl dgst -$METHOD $FILE | sed 's/([^)]*)//g' >>$DGST
-          done
-
-      - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'release'
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./Xray-${{ env.ASSET_NAME }}.zip*
-          tag: ${{ github.ref }}
-          file_glob: true
-
-      - name: Upload files to Artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: Xray-${{ env.ASSET_NAME }}
-          path: |
-            ./build_assets/*
+          name: release-archive-${{ matrix.assetname }}
+          path: Xray-${{ matrix.assetname }}.zip*
+          if-no-files-found: error
+          overwrite: true

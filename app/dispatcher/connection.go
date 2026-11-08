@@ -55,6 +55,7 @@ func observeDestinations(observation session.ConnectionObservation, network net.
 		}
 	}
 }
+
 func observeUpload(observation session.ConnectionObservation, network net.Network) func(buf.MultiBuffer) {
 	destinations := observeDestinations(observation, network)
 	return func(mb buf.MultiBuffer) {
@@ -64,6 +65,7 @@ func observeUpload(observation session.ConnectionObservation, network net.Networ
 		observation.AddUpload(int64(mb.Len()))
 	}
 }
+
 func observeDownload(observation session.ConnectionObservation, network net.Network) func(buf.MultiBuffer) {
 	destinations := observeDestinations(observation, network)
 	return func(mb buf.MultiBuffer) {
@@ -73,6 +75,7 @@ func observeDownload(observation session.ConnectionObservation, network net.Netw
 		observation.AddDownload(int64(mb.Len()))
 	}
 }
+
 func observeLink(link *transport.Link, observation session.ConnectionObservation, network net.Network) {
 	// WrapLink provides timeout reads. Hook the original pipe where possible;
 	// otherwise count at the wrapper, before cached sniff data is replayed.
@@ -84,6 +87,7 @@ func observeLink(link *transport.Link, observation session.ConnectionObservation
 	}
 	link.Writer = observeLinkWriter(link.Writer, observation, network)
 }
+
 func observeLinkWriter(writer buf.Writer, observation session.ConnectionObservation, network net.Network) buf.Writer {
 	switch writer := writer.(type) {
 	case *pipe.Writer:

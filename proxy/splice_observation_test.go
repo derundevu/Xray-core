@@ -39,6 +39,7 @@ func (o *spliceObservation) SetDownloadDeferred(deferred bool) {
 		close(o.started)
 	}
 }
+
 func (o *spliceObservation) Finish(state string) {
 	o.state = state
 	o.finishes.Add(1)
@@ -69,6 +70,7 @@ func spliceTCPPair(t *testing.T) (*net.TCPConn, *net.TCPConn) {
 	t.Cleanup(func() { conn.Close(); peer.Close() })
 	return conn, peer
 }
+
 func TestSpliceObservationDeferredAndExactFinalBytes(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "android" {
 		t.Skip("kernel splice is Linux/Android only")

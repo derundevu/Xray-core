@@ -1,98 +1,128 @@
 name: Build and Release
 
 on:
-  workflow_dispatch:
-  release:
-    types: [published]
   push:
-  pull_request:
-    types: [opened, synchronize, reopened]
+    tags: ['v*.*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing four-part tag; select the same tag as the workflow ref
+        required: true
+        type: string
+
+# Serialize publication, including numeric latest selection, across all release tags.
+concurrency:
+  group: yaxc-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  check-assets:
+  validate:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
+    outputs:
+      tag: ${{ steps.identity.outputs.tag }}
+      commit: ${{ steps.identity.outputs.commit }}
+      version: ${{ steps.identity.outputs.version }}
+      upstream-tag: ${{ steps.identity.outputs.upstream-tag }}
+      go-version: ${{ steps.identity.outputs.go-version }}
     steps:
-      - name: Restore Geodat Cache
-        uses: actions/cache/restore@v6
+      - uses: actions/checkout@v7
         with:
-          path: resources
-          key: xray-geodat-
-
-      - name: Restore Wintun Cache
-        uses: actions/cache/restore@v6
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
         with:
-          path: resources
-          key: xray-wintun-
-
-      - name: Check Assets Existence
-        id: check-assets
+          go-version-file: go.mod
+          check-latest: true
+      - name: Validate tag, source version, and ancestry
+        id: identity
+        env:
+          REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          [ -d 'resources' ] || mkdir resources
-          LIST=('geoip.dat' 'geosite.dat')
-          for FILE_NAME in "${LIST[@]}"
-          do
-            echo -e "Checking ${FILE_NAME}..."
-            if [ -s "./resources/${FILE_NAME}" ]; then
-              echo -e "${FILE_NAME} exists."
-            else
-              echo -e "${FILE_NAME} does not exist."
-              echo "missing=true" >> $GITHUB_OUTPUT
-              break
-            fi
-          done
-          LIST=('amd64' 'x86' 'arm64')
-          for ARCHITECTURE in "${LIST[@]}"
-          do
-            echo -e "Checking wintun.dll for ${ARCHITECTURE}..."
-            if [ -s "./resources/wintun/bin/${ARCHITECTURE}/wintun.dll" ]; then
-              echo -e "wintun.dll for ${ARCHITECTURE} exists."
-            else
-              echo -e "wintun.dll for ${ARCHITECTURE} is missing."
-              echo "missing=true" >> $GITHUB_OUTPUT
-              break
-            fi
-          done
-
-      - name: Trigger Asset Update Workflow if Assets Missing
-        if: steps.check-assets.outputs.missing == 'true'
+          set -euo pipefail
+          tag=$REQUESTED_TAG
+          [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" == "$tag" ]]
+          [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.[1-9][0-9]*$ ]]
+          commit=$(git rev-parse HEAD)
+          [[ "$commit" =~ ^[0-9a-f]{40}$ && "$commit" == "$GITHUB_SHA" ]]
+          git fetch --no-tags origin "refs/heads/main:refs/remotes/origin/main" "refs/heads/yaxc/main:refs/remotes/origin/yaxc/main" "refs/tags/$tag:refs/release-validation/tag"
+          [[ "$(git rev-parse 'refs/release-validation/tag^{commit}')" == "$commit" ]]
+          git merge-base --is-ancestor "$commit" refs/remotes/origin/yaxc/main
+          version=$(go run .github/build/source-version.go)
+          [[ "$tag" == "v$version" ]]
+          upstream="v${version%.*}"
+          git fetch --no-tags https://github.com/XTLS/Xray-core.git "refs/tags/$upstream:refs/release-validation/upstream"
+          git merge-base --is-ancestor 'refs/release-validation/upstream^{commit}' "$commit"
+          git merge-base --is-ancestor 'refs/release-validation/upstream^{commit}' refs/remotes/origin/main
+          toolchain=$(go env GOVERSION)
+          [[ "$toolchain" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          printf 'tag=%s\ncommit=%s\nversion=%s\nupstream-tag=%s\ngo-version=%s\n' "$tag" "$commit" "$version" "$upstream" "${toolchain#go}" >> "$GITHUB_OUTPUT"
+      - name: Reject already published releases
         uses: actions/github-script@v9
+        env:
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const { owner, repo } = context.repo;
-            await github.rest.actions.createWorkflowDispatch({
-              owner,
-              repo,
-              workflow_id: 'scheduled-assets-update.yml',
-              ref: context.ref
-            });
-            console.log('Triggered scheduled-assets-update.yml due to missing assets on branch:', context.ref);
+            await require('./.github/build/release.cjs').preflight({ github, context });
 
-      - name: Sleep for 90 seconds if Assets Missing
-        if: steps.check-assets.outputs.missing == 'true'
-        run: sleep 90
+  resources:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - name: Download one verified resource snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/build/download-resources.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-resources
+          path: |
+            resources/geoip.dat
+            resources/geosite.dat
+            resources/wintun/
+          if-no-files-found: error
+          overwrite: true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-docker-resources
+          path: resources/docker/
+          if-no-files-found: error
+          overwrite: true
+
+  checks:
+    needs: [validate, resources]
+    uses: ./.github/workflows/test.yml
+    with:
+      commit: ${{ needs.validate.outputs.commit }}
+      go-version: ${{ needs.validate.outputs.go-version }}
+      resources-artifact: release-resources
 
   build:
-    needs: check-assets
-    permissions:
-      contents: write
+    needs: [validate, resources]
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        # Include amd64 on all platforms.
         goos: [windows, freebsd, openbsd, linux, darwin]
-        goarch: [amd64, 386]
-        patch-assetname: [""]
+        goarch: [amd64, '386']
+        patch-assetname: ['']
         exclude:
-          # Exclude i386 on darwin
-          - goarch: 386
+          - goarch: '386'
             goos: darwin
         include:
-          # BEGIN MacOS ARM64
           - goos: darwin
             goarch: arm64
-          # END MacOS ARM64
-          # BEGIN Linux ARM 5 6 7
           - goos: linux
             goarch: arm
             goarm: 7
@@ -102,29 +132,19 @@ jobs:
           - goos: linux
             goarch: arm
             goarm: 5
-          # END Linux ARM 5 6 7
-          # BEGIN Android ARM 8
           - goos: android
             goarch: arm64
-          # END Android ARM 8
-          # BEGIN Android AMD64
           - goos: android
             goarch: amd64
             patch-assetname: android-amd64
-          # END Android AMD64
-          # Windows ARM
           - goos: windows
             goarch: arm64
-          # BEGIN Other architectures
-          # BEGIN riscv64 & ARM64 & LOONG64
           - goos: linux
             goarch: arm64
           - goos: linux
             goarch: riscv64
           - goos: linux
             goarch: loong64
-          # END riscv64 & ARM64 & LOONG64
-          # BEGIN MIPS
           - goos: linux
             goarch: mips64
           - goos: linux
@@ -133,162 +153,142 @@ jobs:
             goarch: mipsle
           - goos: linux
             goarch: mips
-          # END MIPS
-          # BEGIN PPC
           - goos: linux
             goarch: ppc64
           - goos: linux
             goarch: ppc64le
-          # END PPC
-          # BEGIN FreeBSD ARM
           - goos: freebsd
             goarch: arm64
           - goos: freebsd
             goarch: arm
             goarm: 7
-          # END FreeBSD ARM
-          # BEGIN S390X
           - goos: linux
             goarch: s390x
-          # END S390X
-          # END Other architectures
-          # BEGIN OPENBSD ARM
           - goos: openbsd
             goarch: arm64
           - goos: openbsd
             goarch: arm
             goarm: 7
-          # END OPENBSD ARM
-      fail-fast: false
-
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
     env:
       GOOS: ${{ matrix.goos }}
       GOARCH: ${{ matrix.goarch }}
       GOARM: ${{ matrix.goarm }}
-      CGO_ENABLED: 0
+      CGO_ENABLED: '0'
+      GOTOOLCHAIN: local
     steps:
-      - name: Checkout codebase
-        uses: actions/checkout@v7
-
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ needs.validate.outputs.go-version }}
       - name: Set up NDK
         if: matrix.goos == 'android'
         run: |
-          wget -qO android-ndk.zip https://dl.google.com/android/repository/android-ndk-r28b-linux.zip
-          unzip android-ndk.zip
+          set -euo pipefail
+          curl --fail --show-error --location https://dl.google.com/android/repository/android-ndk-r28b-linux.zip -o android-ndk.zip
+          unzip -q android-ndk.zip
           rm android-ndk.zip
-          declare -A arches=(
-            ["amd64"]="x86_64-linux-android24-clang"
-            ["arm64"]="aarch64-linux-android24-clang"
-          )
-          echo CC="$(realpath android-ndk-*/toolchains/llvm/prebuilt/linux-x86_64/bin)/${arches[${{ matrix.goarch }}]}" >> $GITHUB_ENV
-          echo CGO_ENABLED=1 >> $GITHUB_ENV
-
-      - name: Show workflow information
+          declare -A arches=([amd64]=x86_64-linux-android24-clang [arm64]=aarch64-linux-android24-clang)
+          echo "CC=$GITHUB_WORKSPACE/android-ndk-r28b/toolchains/llvm/prebuilt/linux-x86_64/bin/${arches[$GOARCH]}" >> "$GITHUB_ENV"
+          echo CGO_ENABLED=1 >> "$GITHUB_ENV"
+      - name: Resolve existing platform filename
+        env:
+          PATCH_ASSET_NAME: ${{ matrix.patch-assetname }}
         run: |
-          _NAME=${{ matrix.patch-assetname }}
-          [ -n "$_NAME" ] || _NAME=$(jq ".[\"$GOOS-$GOARCH$GOARM$GOMIPS\"].friendlyName" -r < .github/build/friendly-filenames.json)
-          echo "GOOS: $GOOS, GOARCH: $GOARCH, GOARM: $GOARM, GOMIPS: $GOMIPS, RELEASE_NAME: $_NAME"
-          echo "ASSET_NAME=$_NAME" >> $GITHUB_ENV
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          check-latest: true
-
-      - name: Get project dependencies
-        run: go mod download
-
+          set -euo pipefail
+          name=$PATCH_ASSET_NAME
+          if [[ -z "$name" ]]; then
+            name=$(jq -er --arg key "$GOOS-$GOARCH$GOARM" '.[$key].friendlyName' .github/build/friendly-filenames.json)
+          fi
+          echo "ASSET_NAME=$name" >> "$GITHUB_ENV"
       - name: Build Xray
         run: |
+          set -euo pipefail
           mkdir -p build_assets
-          COMMID=$(git describe --always --dirty)
-          if [[ ${GOOS} == 'windows' ]]; then
-            echo 'Building Xray for Windows...'
-            go build -o build_assets/xray.exe -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
-            # The line below is for without running conhost.exe version. Commented for not being used. Provided for reference.
-            # go build -o build_assets/wxray.exe -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-H windowsgui -X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
-          elif [[ ${GOOS} == 'android' ]]; then
-            echo 'Building Xray for Android...'
-            go build -o build_assets/xray -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid= -checklinkname=0" -v ./main
-          else
-            echo 'Building Xray...'
-            if [[ ${GOARCH} == 'mips' || ${GOARCH} == 'mipsle' ]]; then
-              go build -o build_assets/xray -trimpath -buildvcs=false -gcflags="-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
-              echo 'Building soft-float Xray for MIPS/MIPSLE 32-bit...'
-              GOMIPS=softfloat go build -o build_assets/xray_softfloat -trimpath -buildvcs=false -gcflags="-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
-            else
-              go build -o build_assets/xray -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" -v ./main
-            fi
+          commit=$(git rev-parse --short=7 HEAD)
+          flags="-X github.com/xtls/xray-core/core.build=$commit -s -w -buildid="
+          output=build_assets/xray
+          [[ "$GOOS" != windows ]] || output+=.exe
+          [[ "$GOOS" != android ]] || flags+=' -checklinkname=0'
+          gcflags=all=-l=4
+          if [[ "$GOARCH" == mips || "$GOARCH" == mipsle ]]; then
+            gcflags=-l=4
           fi
-
-      - name: Restore Geodat Cache
-        uses: actions/cache/restore@v6
+          go build -o "$output" -trimpath -buildvcs=false -gcflags="$gcflags" -ldflags="$flags" -v ./main
+          if [[ "$GOARCH" == mips || "$GOARCH" == mipsle ]]; then
+            GOMIPS=softfloat go build -o build_assets/xray_softfloat -trimpath -buildvcs=false -gcflags="$gcflags" -ldflags="$flags" -v ./main
+          fi
+      - uses: actions/download-artifact@v8
         with:
+          name: release-resources
           path: resources
-          key: xray-geodat-
-
-      - name: Restore Wintun Cache
-        if: matrix.goos == 'windows'
-        uses: actions/cache/restore@v6
+      - name: Package archive and digests
+        run: bash .github/build/package-release.sh
+      - uses: actions/upload-artifact@v7
         with:
-          path: resources
-          key: xray-wintun-
+          name: release-archive-${{ env.ASSET_NAME }}
+          path: Xray-${{ env.ASSET_NAME }}.zip*
+          if-no-files-found: error
+          overwrite: true
 
-      - name: Add additional assets into package
-        run: |
-          mv -f resources/geo* build_assets/
-          if [[ ${GOOS} == 'windows' ]]; then
-            cp .github/build/windows/* build_assets/
-          fi
-          if [[ ${GOOS} == 'windows' ]]; then
-            echo 'Adding Wintun into packages'
-            if [[ ${GOARCH} == 'amd64' ]]; then
-              mv resources/wintun/bin/amd64/wintun.dll build_assets/
-            fi
-            if [[ ${GOARCH} == '386' ]]; then
-              mv resources/wintun/bin/x86/wintun.dll build_assets/
-            fi
-            if [[ ${GOARCH} == 'arm64' ]]; then
-              mv resources/wintun/bin/arm64/wintun.dll build_assets/
-            fi
-            mv resources/wintun/LICENSE.txt build_assets/LICENSE-Wintun
-          fi
+  win7:
+    needs: [validate, resources]
+    uses: ./.github/workflows/release-win7.yml
+    with:
+      commit: ${{ needs.validate.outputs.commit }}
+      go-version: ${{ needs.validate.outputs.go-version }}
+      resources-artifact: release-resources
 
-      - name: Copy README.md & LICENSE
-        run: |
-          cp ${GITHUB_WORKSPACE}/README.md ./build_assets/README.md
-          cp ${GITHUB_WORKSPACE}/LICENSE ./build_assets/LICENSE
+  docker:
+    needs: [validate, resources, checks, build, win7]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker.yml
+    with:
+      tag: ${{ needs.validate.outputs.tag }}
+      commit: ${{ needs.validate.outputs.commit }}
+      go-version: ${{ needs.validate.outputs.go-version }}
 
-      - name: Create ZIP archive
-        if: github.event_name == 'release'
-        shell: bash
-        run: |
-          pushd build_assets || exit 1
-          touch -mt $(date +%Y01010000) *
-          zip -9vr ../Xray-${{ env.ASSET_NAME }}.zip .
-          popd || exit 1
-          FILE=./Xray-${{ env.ASSET_NAME }}.zip
-          DGST=$FILE.dgst
-          for METHOD in {"md5","sha1","sha256","sha512"}
-          do
-            openssl dgst -$METHOD $FILE | sed 's/([^)]*)//g' >>$DGST
-          done
-
-      - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'release'
+  publish:
+    needs: [validate, checks, build, win7, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./Xray-${{ env.ASSET_NAME }}.zip*
-          tag: ${{ github.ref }}
-          file_glob: true
-
-      - name: Upload files to Artifacts
-        uses: actions/upload-artifact@v7
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
         with:
-          name: Xray-${{ env.ASSET_NAME }}
-          path: |
-            ./build_assets/*
+          pattern: release-archive-*
+          path: release-assets
+          merge-multiple: true
+      - name: Generate complete ZIP checksums
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum Xray-*.zip > SHA256SUMS
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload draft assets, promote Docker digest, and publish
+        uses: actions/github-script@v9
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          SOURCE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+          UPSTREAM_TAG: ${{ needs.validate.outputs.upstream-tag }}
+          RELEASE_IMAGE: ${{ needs.docker.outputs.image }}
+          RELEASE_DIGEST: ${{ needs.docker.outputs.digest }}
+        with:
+          script: |
+            await require('./.github/build/release.cjs').publish({ github, context });

@@ -31,7 +31,7 @@ import (
 func trustLoopbackDNSCertificate(t *testing.T, certificate *x509.Certificate) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "dns-fixture-ca.pem")
-	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw}), 0600); err != nil {
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw}), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("SSL_CERT_FILE", path)
@@ -208,8 +208,10 @@ func loopbackQUICDNS(t *testing.T) (*url.URL, *atomic.Int64, *xtls.Config) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return endpoint, requests, &xtls.Config{DisableSystemRoot: true,
-		Certificate: []*xtls.Certificate{{Certificate: certificate, Usage: xtls.Certificate_AUTHORITY_VERIFY}}}
+	return endpoint, requests, &xtls.Config{
+		DisableSystemRoot: true,
+		Certificate:       []*xtls.Certificate{{Certificate: certificate, Usage: xtls.Certificate_AUTHORITY_VERIFY}},
+	}
 }
 
 func requireLoopbackDNSQuery(t *testing.T, query func(context.Context, string, featureDNS.IPOption) ([]net.IP, uint32, error), option featureDNS.IPOption) {

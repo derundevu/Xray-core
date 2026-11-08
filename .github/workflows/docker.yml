@@ -1,79 +1,74 @@
-name: Build and Push Docker Image
+name: Build Docker Release Digests
 
 on:
-  release:
-    types:
-      - published
-      - released
-
-  workflow_dispatch:
+  workflow_call:
     inputs:
       tag:
-        description: "Docker image tag:"
+        description: Existing four-part release tag
         required: true
-      latest:
-        description: "Set to latest"
-        type: boolean
-        default: false
+        type: string
+      commit:
+        description: Full release commit SHA
+        required: true
+        type: string
+      go-version:
+        description: Exact Go toolchain version
+        required: true
+        type: string
+    outputs:
+      image:
+        description: Lowercase GHCR image name
+        value: ${{ jobs.build.outputs.image }}
+      digest:
+        description: Combined immutable multiarchitecture manifest digest
+        value: ${{ jobs.build.outputs.digest }}
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
-  build-and-push:
-    if: (github.event.action != 'published') || (github.event.action == 'published' && github.event.release.prerelease == true)
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
+    outputs:
+      image: ${{ steps.validate.outputs.image }}
+      digest: ${{ steps.manifest.outputs.digest }}
     steps:
-      - name: Set repository and image name to lowercase
+      - name: Validate release inputs
+        id: validate
         env:
-          IMAGE_NAME: "${{ github.repository }}"
+          SOURCE_TAG: ${{ inputs.tag }}
+          BUILD_COMMIT: ${{ inputs.commit }}
+          GO_VERSION: ${{ inputs.go-version }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          echo "IMAGE_NAME=${IMAGE_NAME,,}" >>${GITHUB_ENV}
-          echo "FULL_IMAGE_NAME=ghcr.io/${IMAGE_NAME,,}" >>${GITHUB_ENV}
+          set -euo pipefail
+          [[ "$SOURCE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.[1-9][0-9]*$ ]] || { echo "Invalid four-part release tag" >&2; exit 1; }
+          [[ "$BUILD_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "Expected a full release commit SHA" >&2; exit 1; }
+          [[ "$GO_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Expected an exact Go toolchain version" >&2; exit 1; }
+          echo "image=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
-      - name: Validate and extract tag
-        run: |
-          SOURCE_TAG="${{ github.event.inputs.tag }}"
-          if [[ -z "$SOURCE_TAG" ]]; then
-            SOURCE_TAG="${{ github.ref_name }}"
-          fi
-          if [[ -z "$SOURCE_TAG" ]]; then
-            SOURCE_TAG="${{ github.event.release.tag_name }}"
-          fi
-
-          if [[ -z "$SOURCE_TAG" ]]; then
-            echo "Error: Could not determine a valid tag source. Input tag and context tag (github.ref_name) are both empty."
-            exit 1
-          fi
-
-          if [[ "$SOURCE_TAG" =~ ^v[0-9]+\.[0-9] ]]; then
-            IMAGE_TAG="${SOURCE_TAG#v}"
-          else
-            IMAGE_TAG="$SOURCE_TAG"
-          fi
-
-          echo "Docker image tag: '$IMAGE_TAG'."
-          echo "IMAGE_TAG=$IMAGE_TAG" >>${GITHUB_ENV}
-
-          LATEST=false
-          if [[ "${{ github.event_name }}" == "release" && "${{ github.event.release.prerelease }}" == "false" ]] || [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.latest }}" == "true" ]]; then
-            LATEST=true
-          fi
-
-          echo "Latest: '$LATEST'."
-          echo "LATEST=$LATEST" >>${GITHUB_ENV}
-
-          NEWEST=false
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            NEWEST=true
-          fi
-
-          echo "Newest: '$NEWEST'."
-          echo "NEWEST=$NEWEST" >>${GITHUB_ENV}
-
-      - name: Checkout code
+      - name: Checkout exact release commit
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check release tag resolves to source commit
+        env:
+          SOURCE_TAG: ${{ inputs.tag }}
+          BUILD_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$BUILD_COMMIT" ]]
+          [[ "$(git rev-parse "refs/tags/${SOURCE_TAG}^{commit}")" == "$BUILD_COMMIT" ]]
+
+      - name: Download release resource snapshot
+        uses: actions/download-artifact@v8
+        with:
+          name: release-docker-resources
+          path: resources/docker
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -85,11 +80,11 @@ jobs:
         uses: docker/login-action@v4.7.0
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
+          username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Docker image (main architectures)
-        id: build_main_arches
+        id: main
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -100,11 +95,16 @@ jobs:
             linux/arm64/v8
             linux/ppc64le
             linux/s390x
+          build-args: |
+            GO_VERSION=${{ inputs.go-version }}
+            BUILD_COMMIT=${{ inputs.commit }}
+            VERSION=${{ inputs.tag }}
+            SOURCE=${{ github.server_url }}/${{ github.repository }}
           provenance: false
-          outputs: type=image,name=${{ env.FULL_IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ steps.validate.outputs.image }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Build Docker image (additional architectures)
-        id: build_additional_arches
+        id: additional
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -114,39 +114,42 @@ jobs:
             linux/arm/v6
             linux/riscv64
             linux/loong64
+          build-args: |
+            GO_VERSION=${{ inputs.go-version }}
+            BUILD_COMMIT=${{ inputs.commit }}
+            VERSION=${{ inputs.tag }}
+            SOURCE=${{ github.server_url }}/${{ github.repository }}
           provenance: false
-          outputs: type=image,name=${{ env.FULL_IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ steps.validate.outputs.image }},push-by-digest=true,name-canonical=true,push=true
 
-      - name: Create manifest list and push
+      - name: Push combined manifest by digest only
+        id: manifest
+        env:
+          IMAGE: ${{ steps.validate.outputs.image }}
+          MAIN_DIGEST: ${{ steps.main.outputs.digest }}
+          ADDITIONAL_DIGEST: ${{ steps.additional.outputs.digest }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Creating multi-arch manifest with tag: '${{ env.FULL_IMAGE_NAME }}:${{ env.IMAGE_TAG }}'."
-          docker buildx imagetools create \
-            --tag ${{ env.FULL_IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
-            ${{ env.FULL_IMAGE_NAME }}@${{ steps.build_main_arches.outputs.digest }} \
-            ${{ env.FULL_IMAGE_NAME }}@${{ steps.build_additional_arches.outputs.digest }}
-
-          if [[ "${{ env.LATEST }}" == "true" ]]; then
-            echo "Adding 'latest' tag to manifest: '${{ env.FULL_IMAGE_NAME }}:latest'."
-            docker buildx imagetools create \
-            --tag ${{ env.FULL_IMAGE_NAME }}:latest \
-            ${{ env.FULL_IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          fi
-
-          if [[ "${{ env.NEWEST }}" == "true" ]]; then
-            echo "Adding 'pre-release' tag to manifest: '${{ env.FULL_IMAGE_NAME }}:pre-release'."
-            docker buildx imagetools create \
-            --tag ${{ env.FULL_IMAGE_NAME }}:pre-release \
-            ${{ env.FULL_IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          fi
-
-      - name: Inspect image
-        run: |
-          docker buildx imagetools inspect ${{ env.FULL_IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-
-          if [[ "${{ env.LATEST }}" == "true" ]]; then
-            docker buildx imagetools inspect ${{ env.FULL_IMAGE_NAME }}:latest
-          fi
-
-          if [[ "${{ env.NEWEST }}" == "true" ]]; then
-            docker buildx imagetools inspect ${{ env.FULL_IMAGE_NAME }}:pre-release
-          fi
+          set -euo pipefail
+          docker buildx imagetools create --dry-run \
+            "$IMAGE@$MAIN_DIGEST" \
+            "$IMAGE@$ADDITIONAL_DIGEST" > combined-manifest.json
+          digest="sha256:$(sha256sum combined-manifest.json | cut -d ' ' -f 1)"
+          media_type="$(jq -er '.mediaType' combined-manifest.json)"
+          repository="${IMAGE#ghcr.io/}"
+          token="$(curl --silent --show-error --fail-with-body \
+            --user "$REGISTRY_USER:$REGISTRY_PASSWORD" \
+            --get --data-urlencode 'service=ghcr.io' \
+            --data-urlencode "scope=repository:${repository}:pull,push" \
+            https://ghcr.io/token | jq -er '.token // .access_token')"
+          echo "::add-mask::$token"
+          # Registry V2 accepts a digest as the manifest reference: no public tag is touched.
+          curl --silent --show-error --fail-with-body \
+            --request PUT \
+            --header "Authorization: Bearer $token" \
+            --header "Content-Type: $media_type" \
+            --data-binary @combined-manifest.json \
+            --output /dev/null \
+            "https://ghcr.io/v2/${repository}/manifests/${digest}"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"

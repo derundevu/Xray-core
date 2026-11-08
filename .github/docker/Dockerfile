@@ -1,16 +1,21 @@
-# syntax=docker/dockerfile:latest
-FROM --platform=$BUILDPLATFORM golang:latest AS build
+# syntax=docker/dockerfile:1
+ARG GO_VERSION
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS build
 
 # Build xray-core
 WORKDIR /src
 COPY . .
 ARG TARGETOS
 ARG TARGETARCH
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 go build -o xray -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags "-s -w -buildid=" ./main
+ARG TARGETVARIANT
+ARG BUILD_COMMIT
+RUN if [ "$TARGETARCH" = arm ]; then export GOARM="${TARGETVARIANT#v}"; fi; \
+    GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 GOTOOLCHAIN=local \
+    go build -o xray -trimpath -buildvcs=false -gcflags="all=-l=4" \
+    -ldflags "-s -w -buildid= -X github.com/xtls/xray-core/core.build=$(printf '%.7s' "$BUILD_COMMIT")" ./main
 
-# Download geodat into a staging directory
-ADD https://raw.githubusercontent.com/XTLS/Xray-rules-dat/release/geoip/geoip-full.dat /tmp/geodat/geoip.dat
-ADD https://raw.githubusercontent.com/XTLS/Xray-rules-dat/release/geosite/geosite-expand.dat /tmp/geodat/geosite.dat
+# Use the same resource snapshot as the release archives.
+COPY resources/docker/geoip.dat resources/docker/geosite.dat /tmp/geodat/
 
 RUN mkdir -p /tmp/empty
 
@@ -42,6 +47,13 @@ RUN echo '{}' >/tmp/usr/local/etc/xray/99_version.json
 
 # Build finally image
 FROM gcr.io/distroless/static:nonroot
+
+ARG BUILD_COMMIT
+ARG VERSION
+ARG SOURCE
+LABEL org.opencontainers.image.version=$VERSION \
+      org.opencontainers.image.revision=$BUILD_COMMIT \
+      org.opencontainers.image.source=$SOURCE
 
 COPY --from=build --chown=0:0 --chmod=755 /src/xray /usr/local/bin/xray
 COPY --from=build --chown=65532:65532 --chmod=755 /tmp/empty /usr/local/share/xray

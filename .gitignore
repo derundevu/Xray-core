@@ -39,6 +39,7 @@ errorgen
 
 # Build assets
 /build_assets/
+/resources/
 
 # Output from dlv test
 **/debug.*

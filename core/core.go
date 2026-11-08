@@ -57,10 +57,9 @@ func init() {
 	}
 }
 
-// Version returns Xray's version as a string, in the form of "x.y.z" where x, y and z are numbers.
-// ".z" part may be omitted in regular releases.
+// Version returns the upstream version followed by the yaxc fork revision.
 func Version() string {
-	return fmt.Sprintf("%v.%v.%v", Version_x, Version_y, Version_z)
+	return fmt.Sprintf("%v.%v.%v.%v", Version_x, Version_y, Version_z, YaxcRevision)
 }
 
 // VersionStatement returns a list of strings representing the full version info.

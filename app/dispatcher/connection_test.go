@@ -41,18 +41,22 @@ func (o *flowObservation) Open(metadata session.ConnectionMetadata) session.Conn
 	o.metadata = metadata
 	return o
 }
+
 func (o *flowObservation) Routed(route session.ConnectionRoute) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.route = route
 	o.routes++
 }
+
 func (o *flowObservation) Destination(destination net.Destination) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.destinations = append(o.destinations, destination)
 }
-func (o *flowObservation) AddUpload(n int64)      { o.mu.Lock(); defer o.mu.Unlock(); o.upload += n }
+
+func (o *flowObservation) AddUpload(n int64) { o.mu.Lock(); defer o.mu.Unlock(); o.upload += n }
+
 func (o *flowObservation) AddDownload(n int64)    { o.mu.Lock(); defer o.mu.Unlock(); o.download += n }
 func (o *flowObservation) MarkBytesIncomplete()   { o.incomplete.Store(true) }
 func (*flowObservation) SetDownloadDeferred(bool) {}
@@ -92,6 +96,7 @@ func (r *flowRouter) PickRoute(routing.Context) (routing.Route, error) {
 	<-r.proceed
 	return flowRoute{}, nil
 }
+
 func flowDispatcher(t *testing.T, handler *flowHandler, router routing.Router) (*dispatcher.DefaultDispatcher, *flowObservation) {
 	t.Helper()
 	manager, err := outboundmanager.New(context.Background(), &proxyman.OutboundConfig{})

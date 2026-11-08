@@ -59,14 +59,17 @@ func ConnectionObservationDetachedContext(ctx context.Context) context.Context {
 	}
 	return ContextWithConnectionObservation(context.Background(), ConnectionObservationFromContext(ctx))
 }
+
 func ConnectionObservationFromContext(ctx context.Context) ConnectionObservation {
 	observation, _ := ctx.Value(connectionObservationKey).(ConnectionObservation)
 	return observation
 }
+
 func ContextWithConnectionObservationDisabled(ctx context.Context) context.Context {
 	ctx = context.WithValue(ctx, connectionObservationDisabledKey, true)
 	return ContextWithConnectionObservation(ctx, nil)
 }
+
 func ConnectionObservationDisabledFromContext(ctx context.Context) bool {
 	disabled, _ := ctx.Value(connectionObservationDisabledKey).(bool)
 	return disabled
@@ -90,9 +93,11 @@ type ConnectionObservationHandle struct {
 func NewConnectionObservationHandle(observation ConnectionObservation) *ConnectionObservationHandle {
 	return &ConnectionObservationHandle{ConnectionObservation: observation, refs: 1, outcome: "closed"}
 }
+
 func (h *ConnectionObservationHandle) Routed(route ConnectionRoute) {
 	h.routeOnce.Do(func() { h.ConnectionObservation.Routed(route) })
 }
+
 func (h *ConnectionObservationHandle) SetOutcome(state string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -101,6 +106,7 @@ func (h *ConnectionObservationHandle) SetOutcome(state string) {
 		h.outcome = state
 	}
 }
+
 func outcomePriority(state string) int {
 	switch state {
 	case "blocked":
@@ -113,6 +119,7 @@ func outcomePriority(state string) int {
 		return 0
 	}
 }
+
 func (h *ConnectionObservationHandle) Retain() func(string) {
 	h.mu.Lock()
 	if h.finished {
@@ -141,6 +148,7 @@ func (h *ConnectionObservationHandle) RetainTask() func(error) {
 		once.Do(func() { h.release(connectionErrorOutcome(ctx, err)) })
 	}
 }
+
 func (h *ConnectionObservationHandle) release(state string) {
 	h.mu.Lock()
 	if h.finished {
@@ -177,6 +185,7 @@ func (h *ConnectionObservationHandle) release(state string) {
 func (h *ConnectionObservationHandle) Finish(state string) {
 	h.finishOnce.Do(func() { h.release(state) })
 }
+
 func (h *ConnectionObservationHandle) BindContext(ctx context.Context) {
 	stop := context.AfterFunc(ctx, func() { h.SetOutcome("interrupted") })
 	h.mu.Lock()
@@ -195,6 +204,7 @@ func SetConnectionOutcome(ctx context.Context, state string) {
 		h.SetOutcome(state)
 	}
 }
+
 func RetainConnectionObservation(ctx context.Context) func(string) {
 	if h, ok := ConnectionObservationFromContext(ctx).(*ConnectionObservationHandle); ok {
 		return h.Retain()

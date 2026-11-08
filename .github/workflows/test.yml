@@ -2,52 +2,56 @@ name: Tests and Checkings
 
 on:
   push:
+    branches: ['**']
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_call:
+    inputs:
+      commit:
+        type: string
+        default: ''
+      go-version:
+        type: string
+        default: ''
+      resources-artifact:
+        type: string
+        default: ''
+
+permissions:
+  contents: read
 
 jobs:
-  check-assets:
+  resources:
+    if: inputs.resources-artifact == ''
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
     steps:
-      - name: Restore Geodat Cache
-        uses: actions/cache/restore@v6
+      - uses: actions/checkout@v7
         with:
-          path: resources
-          key: xray-geodat-
-      - name: Check Assets Existence
-        id: check-assets
-        run: |
-          [ -d 'resources' ] || mkdir resources
-          LIST=('geoip.dat' 'geosite.dat')
-          for FILE_NAME in "${LIST[@]}"
-          do
-            echo -e "Checking ${FILE_NAME}..."
-            if [ -s "./resources/${FILE_NAME}" ]; then
-              echo -e "${FILE_NAME} exists."
-            else
-              echo -e "${FILE_NAME} does not exist."
-              echo "missing=true" >> $GITHUB_OUTPUT
-              break
-            fi
-          done
-      - name: Sleep for 90 seconds if Assets Missing
-        if: steps.check-assets.outputs.missing == 'true'
-        run: sleep 90
+          ref: ${{ inputs.commit || github.sha }}
+          persist-credentials: false
+      - name: Download verified geodata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/build/download-resources.sh --geodata-only
+      - uses: actions/upload-artifact@v7
+        with:
+          name: checks-resources
+          path: resources/
+          if-no-files-found: error
+          overwrite: true
 
   check-format-and-proto:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
-    permissions:
-      contents: read
     steps:
-      - name: Checkout codebase
-        uses: actions/checkout@v7
-      - name: Set up Go
-        uses: actions/setup-go@v7
+      - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.commit || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ inputs.go-version }}
           go-version-file: go.mod
-          check-latest: true
+          check-latest: ${{ inputs.go-version == '' }}
           cache: false
       - name: Check Format
         run: go run ./infra/vformat/main.go -mode check -pwd ./
@@ -55,28 +59,51 @@ jobs:
         run: go run ./infra/vprotogen/main.go -mode check -pwd ./
 
   test:
-    needs: check-assets
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
-    permissions:
-      contents: read
+    needs: resources
+    if: ${{ !cancelled() && (needs.resources.result == 'success' || needs.resources.result == 'skipped') }}
     runs-on: ${{ matrix.os }}
+    env:
+      XRAY_LOCATION_ASSET: ${{ github.workspace }}/resources
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
-      - name: Checkout codebase
-        uses: actions/checkout@v7
-      - name: Set up Go
-        uses: actions/setup-go@v7
+      - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.commit || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ inputs.go-version }}
           go-version-file: go.mod
-          check-latest: true
-      - name: Restore Geodat Cache
-        uses: actions/cache/restore@v6
+          check-latest: ${{ inputs.go-version == '' }}
+      - uses: actions/download-artifact@v8
         with:
+          name: ${{ inputs.resources-artifact || 'checks-resources' }}
           path: resources
-          key: xray-geodat-
-          enableCrossOsArchive: true
       - name: Test
         run: go test -timeout 1h -v ./...
+      - name: Native CLI version and configuration smoke
+        run: |
+          set -euo pipefail
+          version=$(go run .github/build/source-version.go)
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.[1-9][0-9]*$ ]]
+          commit=$(git rev-parse --short=7 HEAD)
+          go build -trimpath -buildvcs=false -ldflags="-X github.com/xtls/xray-core/core.build=$commit" -o smoke-xray.exe ./main
+          statement=$(./smoke-xray.exe version)
+          printf '%s\n' "$statement"
+          read -r product actual _ <<< "$statement"
+          [[ "$product" == Xray && "$actual" == "$version" ]]
+          cat > smoke-config.json <<'JSON'
+          {"log":{"loglevel":"warning"},"outbounds":[{"tag":"direct","protocol":"freedom"}],"routing":{"rules":[{"type":"field","domain":["geosite:cn"],"outboundTag":"direct"},{"type":"field","ip":["geoip:private"],"outboundTag":"direct"}]}}
+          JSON
+          ./smoke-xray.exe run -test -config smoke-config.json
+          printf '%s\n' '{"outbounds":[{"protocol":"not-a-protocol"}]}' > smoke-invalid.json
+          if ./smoke-xray.exe run -test -config smoke-invalid.json; then
+            echo 'Invalid configuration unexpectedly accepted' >&2
+            exit 1
+          fi

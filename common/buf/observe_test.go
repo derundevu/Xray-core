@@ -42,6 +42,7 @@ func TestObservedNativeWriterExactPartialBytes(t *testing.T) {
 		}
 	}
 }
+
 func TestObservedWriterPreservesReaderFrom(t *testing.T) {
 	var total int64
 	writer := buf.ObserveWriter(observedFromWriter{}, func(n int64) { total += n }, nil, nil)
@@ -57,6 +58,7 @@ func TestObservedWriterPreservesReaderFrom(t *testing.T) {
 		t.Fatalf("ReadFrom = %d, %v; count %d", n, err, total)
 	}
 }
+
 func TestObservedSequentialWriterExactPartialBytes(t *testing.T) {
 	var total int64
 	writer := &buf.SequentialWriter{Writer: partialObservedWriter{}}
@@ -201,6 +203,7 @@ func (w *opaqueObservedWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	w.delivered += int64(mb.Len())
 	return nil
 }
+
 func TestObservedOpaqueFailurePermanentlyMarksUnavailablePrefix(t *testing.T) {
 	writer := new(opaqueObservedWriter)
 	var total int64

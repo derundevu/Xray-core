@@ -92,6 +92,7 @@ func (w *observedWriter) WriteMultiBuffer(mb MultiBuffer) error {
 	}
 	return err
 }
+
 func (w *observedWriter) Close() error {
 	err := common.Close(w.Writer)
 	if err != nil && w.incomplete != nil {
@@ -137,6 +138,7 @@ func (w *observedWriterBoth) Write(p []byte) (int, error) {
 	w.count(int64(n))
 	return n, err
 }
+
 func (w *observedWriterBoth) ReadFrom(r io.Reader) (int64, error) {
 	n, err := w.readerFrom.ReadFrom(r)
 	w.count(n)

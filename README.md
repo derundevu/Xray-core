@@ -1,5 +1,106 @@
 # Project X
 
+## yaxc fork releases
+
+This fork is used by [yaxc](https://github.com/derundevu/yaxc) and can provide
+the Xray executable for PasarGuard Node.
+
+### Branches and versions
+
+- `main` mirrors an adopted **stable upstream release tag**, not upstream's
+  moving development branch. Update it only when adopting a new Xray release.
+- `yaxc/main` is the fork's integration and default branch. It contains the
+  upstream base and all fork changes.
+- `yaxc/migration-*` branches prepare upstream upgrades; merge them into
+  `yaxc/main` after resolving conflicts and checking the consumers.
+- Fork release tags have four numeric components: `v26.10.31.1`,
+  `v26.10.31.2`, then revision `1` again on the next upstream base.
+
+The upstream version stays in `core/core.go`; the fork revision is
+`YaxcRevision` in `core/yaxc_version.go`. `core.Version()` and `xray version`
+report the full four-part version, including when core is built as a library
+without release linker flags. Build metadata identifies the source commit.
+Configuration `version.min`/`version.max` and the REALITY protocol version
+continue to use the three-part upstream version.
+
+Four-part release tags are not Go module SemVer. Keep the module path
+`github.com/xtls/xray-core`; Go consumers should pin a commit/pseudo-version,
+not assume `go get @v26.10.31.1` is a module release.
+
+### Adopting an upstream release
+
+1. Fetch the chosen stable tag from `https://github.com/XTLS/Xray-core.git`
+   (`upstream`), then fast-forward `main` to that exact tag. Do not merge
+   upstream's development branch or force-reset published history.
+2. Create a migration branch **from `yaxc/main`**, then merge `main` into it.
+   Existing fork changes remain in the history; do not collect or replay
+   patches from old releases.
+3. Resolve conflicts and check behavior, including yaxc's Android build and
+   PasarGuard's server configuration. A clean Git merge is not a compatibility
+   check.
+4. Reset `YaxcRevision` to `1` for the new base, then merge the migration into
+   `yaxc/main`. Do not rebase already released commits.
+
+For another fork-only release on the same upstream base, increment
+`YaxcRevision` instead; leave `main` unchanged.
+
+### Publishing
+
+Local checks need the geodata fixture at `resources/` (and an authenticated
+GitHub CLI for resolving its source commit):
+
+```sh
+bash .github/build/download-resources.sh --geodata-only
+go test -timeout 10m ./...
+```
+
+Commit and publish the reviewed `yaxc/main` changes first. Create an annotated
+tag matching the source version, for example `v26.10.31.1`, and publish that
+tag. Do not create a public GitHub Release manually.
+
+The [release workflow](.github/workflows/release.yml) validates the tag,
+source version, fork ancestry and original upstream release base. It runs the
+checks, builds the platform archives and Docker images using one resource
+snapshot, and publishes the completed release with `SHA256SUMS`. Archive names
+remain compatible with upstream, such as `Xray-linux-64.zip`.
+
+The snapshot preserves the usual databases in ZIPs and the full/expanded
+databases in Docker. Windows 7 packages require the matching
+`XTLS/go-win7` release `patched-<resolved Go version>`; a missing builder fails
+the release rather than silently omitting those packages.
+
+Docker images are published at `ghcr.io/derundevu/xray-core:26.10.31.1`
+(without the leading `v`). `latest` advances only for a newer stable fork
+release. Released tags, assets and versioned image tags must not be overwritten;
+publish another revision for corrections. For a failed run, use GitHub Actions'
+failed-job rerun, or dispatch the release workflow on the existing release tag,
+not on a branch.
+
+```sh
+gh workflow run release.yml --ref v26.10.31.1 -f tag=v26.10.31.1
+```
+
+If Docker promotion already succeeded, rerun the failed publication job rather
+than rebuilding everything: a different digest cannot replace a versioned tag.
+
+Repository setup after the first branch publication:
+
+- Set the GitHub default branch to `yaxc/main` and enable Actions in the fork.
+- Permit release jobs to write repository contents and GHCR packages.
+- Protect `main`/`yaxc/main` and prohibit release-tag updates/deletions.
+- Make the GHCR package public if consumers need anonymous image pulls.
+
+### Consumers
+
+- **yaxc:** pin `XrayCore/Xray-core` to the released tag's commit and keep the
+  local Go `replace`. Build `XrayCore.aar` in yaxc; a release's Android executable
+  is not an AAR replacement.
+- **PasarGuard Node:** install the matching platform archive, verify
+  `SHA256SUMS`, and configure `XRAY_EXECUTABLE_PATH` and `XRAY_ASSETS_PATH`.
+  For Docker deployments, supply the binary inside the Node container; an
+  Xray-only image does not replace the Node image. The current upstream Node
+  version parser displays only the first three version components.
+
 [Project X](https://github.com/XTLS) originates from XTLS protocol, providing a set of network tools such as [Xray-core](https://github.com/XTLS/Xray-core) and [REALITY](https://github.com/XTLS/REALITY).
 
 [README](https://github.com/XTLS/Xray-core#readme) is open, so feel free to submit your project [here](https://github.com/XTLS/Xray-core/pulls).

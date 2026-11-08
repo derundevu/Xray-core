@@ -52,6 +52,7 @@ func TestConnectionObservationRetainsMuxLifetime(t *testing.T) {
 		t.Fatal("lost mux lifetime, outcome or bytes")
 	}
 }
+
 func TestConnectionObservationTrafficDoesNotLockLifecycle(t *testing.T) {
 	o := new(connectionTestObservation)
 	h := NewConnectionObservationHandle(o)
@@ -67,6 +68,7 @@ func TestConnectionObservationTrafficDoesNotLockLifecycle(t *testing.T) {
 	h.mu.Unlock()
 	h.Finish("closed")
 }
+
 func TestConnectionObservationRouteAndFinishOnce(t *testing.T) {
 	o := new(connectionTestObservation)
 	h := NewConnectionObservationHandle(o)
@@ -80,6 +82,7 @@ func TestConnectionObservationRouteAndFinishOnce(t *testing.T) {
 		t.Fatal("duplicate route or completion")
 	}
 }
+
 func TestConnectionObservationErrorAndInternalContext(t *testing.T) {
 	o := new(connectionTestObservation)
 	h := NewConnectionObservationHandle(o)
