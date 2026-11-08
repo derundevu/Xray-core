@@ -57,9 +57,9 @@ func init() {
 	}
 }
 
-// Version returns the upstream version followed by the yaxc fork revision.
+// Version returns the upstream version followed by the proxide fork revision.
 func Version() string {
-	return fmt.Sprintf("%v.%v.%v.%v", Version_x, Version_y, Version_z, YaxcRevision)
+	return fmt.Sprintf("%v.%v.%v.%v", Version_x, Version_y, Version_z, ProxideRevision)
 }
 
 // VersionStatement returns a list of strings representing the full version info.

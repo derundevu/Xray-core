@@ -57,6 +57,8 @@ jobs:
         run: go run ./infra/vformat/main.go -mode check -pwd ./
       - name: Check Protobuf
         run: go run ./infra/vprotogen/main.go -mode check -pwd ./
+      - name: Check release note boundaries
+        run: node --test .github/build/release-notes.test.cjs
 
   test:
     needs: resources

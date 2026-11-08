@@ -1,23 +1,22 @@
-# Project X
+# proxide
 
-## yaxc fork releases
+## proxide releases
 
-This fork is used by [yaxc](https://github.com/derundevu/yaxc) and can provide
-the Xray executable for PasarGuard Node.
+An [Xray-core](https://github.com/XTLS/Xray-core) fork for custom client changes. It is used by [yaxc](https://github.com/derundevu/yaxc).
 
 ### Branches and versions
 
 - `main` mirrors an adopted **stable upstream release tag**, not upstream's
   moving development branch. Update it only when adopting a new Xray release.
-- `yaxc/main` is the fork's integration and default branch. It contains the
+- `fork/main` is the fork's integration and default branch. It contains the
   upstream base and all fork changes.
-- `yaxc/migration-*` branches prepare upstream upgrades; merge them into
-  `yaxc/main` after resolving conflicts and checking the consumers.
+- `fork/migration-*` branches isolate upstream upgrades from the working fork.
+  Merge them into `fork/main` after resolving conflicts and checking consumers.
 - Fork release tags have four numeric components: `v26.10.31.1`,
   `v26.10.31.2`, then revision `1` again on the next upstream base.
 
 The upstream version stays in `core/core.go`; the fork revision is
-`YaxcRevision` in `core/yaxc_version.go`. `core.Version()` and `xray version`
+`ProxideRevision` in `core/proxide_version.go`. `core.Version()` and `xray version`
 report the full four-part version, including when core is built as a library
 without release linker flags. Build metadata identifies the source commit.
 Configuration `version.min`/`version.max` and the REALITY protocol version
@@ -32,17 +31,24 @@ not assume `go get @v26.10.31.1` is a module release.
 1. Fetch the chosen stable tag from `https://github.com/XTLS/Xray-core.git`
    (`upstream`), then fast-forward `main` to that exact tag. Do not merge
    upstream's development branch or force-reset published history.
-2. Create a migration branch **from `yaxc/main`**, then merge `main` into it.
+2. Create a migration branch **from `fork/main`**, then merge `main` into it.
    Existing fork changes remain in the history; do not collect or replay
    patches from old releases.
 3. Resolve conflicts and check behavior, including yaxc's Android build and
    PasarGuard's server configuration. A clean Git merge is not a compatibility
    check.
-4. Reset `YaxcRevision` to `1` for the new base, then merge the migration into
-   `yaxc/main`. Do not rebase already released commits.
+4. Reset `ProxideRevision` to `1` for the new base, then merge the migration into
+   `fork/main`. Do not rebase already released commits.
+
+The migration branch is a temporary workspace for adapting the fork to the new
+upstream, not a separate permanent release line. Ordinary fork-only fixes do not
+require a migration branch.
+
+While migration work is in progress, `fork/main` stays on the previous working
+base. Publish the upgraded fork only after merging the verified migration.
 
 For another fork-only release on the same upstream base, increment
-`YaxcRevision` instead; leave `main` unchanged.
+`ProxideRevision` instead; leave `main` unchanged.
 
 ### Publishing
 
@@ -54,7 +60,7 @@ bash .github/build/download-resources.sh --geodata-only
 go test -timeout 10m ./...
 ```
 
-Commit and publish the reviewed `yaxc/main` changes first. Create an annotated
+Commit and publish the reviewed `fork/main` changes first. Create an annotated
 tag matching the source version, for example `v26.10.31.1`, and publish that
 tag. Do not create a public GitHub Release manually.
 
@@ -69,7 +75,7 @@ databases in Docker. Windows 7 packages require the matching
 `XTLS/go-win7` release `patched-<resolved Go version>`; a missing builder fails
 the release rather than silently omitting those packages.
 
-Docker images are published at `ghcr.io/derundevu/xray-core:26.10.31.1`
+Docker images are published at `ghcr.io/derundevu/proxide:26.10.31.1`
 (without the leading `v`). `latest` advances only for a newer stable fork
 release. Released tags, assets and versioned image tags must not be overwritten;
 publish another revision for corrections. For a failed run, use GitHub Actions'
@@ -85,16 +91,54 @@ than rebuilding everything: a different digest cannot replace a versioned tag.
 
 Repository setup after the first branch publication:
 
-- Set the GitHub default branch to `yaxc/main` and enable Actions in the fork.
+- Set the GitHub default branch to `fork/main` and enable Actions in the fork.
 - Permit release jobs to write repository contents and GHCR packages.
-- Protect `main`/`yaxc/main` and prohibit release-tag updates/deletions.
+- Protect `main`/`fork/main` and prohibit release-tag updates/deletions.
 - Make the GHCR package public if consumers need anonymous image pulls.
+
+In each local checkout, also select this fork for GitHub CLI commands; otherwise
+`gh` may select the parent Xray repository:
+
+```sh
+gh repo set-default derundevu/proxide
+```
+
+### Release notes
+
+Release notes are generated from Git history, not merged PRs. Each release has:
+
+- **Upstream:** the original Xray release link, plus an upstream comparison when
+  the base version changes.
+- **Fork changes:** new fork commit subjects with commit links. Upstream commits
+  and commits already reachable from the previous fork release are excluded.
+  Fork merge commits remain visible because they can contain conflict resolutions.
+- **Full diff:** the complete comparison with the previous fork release; for
+  the first release, comparison with the original upstream commit. This full
+  comparison includes upstream changes when the base version changes.
+- **Build:** source version, commit, Docker tag and image digest.
+
+The previous fork release is the numerically greatest older published stable
+four-part version whose tag is an ancestor of the released commit. Drafts,
+prereleases and unrelated release branches are not used as the baseline.
+If no such release exists, the notes describe all fork commits relative to the
+current upstream base.
+
+Preview notes for committed `HEAD` from a full checkout with fork release tags:
+
+```sh
+node .github/build/release-notes.cjs v26.10.31.1 derundevu/proxide
+```
+
+The preview needs read access through `gh`, does not create or publish anything,
+and omits the image digest until the release build supplies it. Uncommitted
+changes are not part of the preview.
 
 ### Consumers
 
-- **yaxc:** pin `XrayCore/Xray-core` to the released tag's commit and keep the
-  local Go `replace`. Build `XrayCore.aar` in yaxc; a release's Android executable
-  is not an AAR replacement.
+- **yaxc:** use `https://github.com/derundevu/proxide.git` as the URL of the
+  `XrayCore/Xray-core` submodule; keep its path and the local Go `replace`.
+  Pin it to the released tag's commit and build `XrayCore.aar` in yaxc;
+  a release's Android executable is not an AAR replacement.
 - **PasarGuard Node:** install the matching platform archive, verify
   `SHA256SUMS`, and configure `XRAY_EXECUTABLE_PATH` and `XRAY_ASSETS_PATH`.
   For Docker deployments, supply the binary inside the Node container; an

@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { versionParts, newer, generateNotes } = require('./release-notes.cjs');
 
 async function getRelease(github, repo, tag) {
   try {
@@ -17,18 +18,6 @@ exports.preflight = async ({ github, context }) => {
   const release = await getRelease(github, context.repo, process.env.RELEASE_TAG);
   if (release && !release.draft) throw new Error('Refusing to overwrite a published release');
 };
-
-function versionParts(tag) {
-  if (!/^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.[1-9][0-9]*$/.test(tag)) return null;
-  return tag.slice(1).split('.').map(BigInt);
-}
-
-function newer(left, right) {
-  for (let i = 0; i < 4; i++) {
-    if (left[i] !== right[i]) return left[i] > right[i];
-  }
-  return false;
-}
 
 exports.publish = async ({ github, context }) => {
   const repo = context.repo;
@@ -55,18 +44,21 @@ exports.publish = async ({ github, context }) => {
   if (JSON.stringify(actual) !== JSON.stringify(expected) || !files.includes('SHA256SUMS')) throw new Error('Incomplete release archive set');
   if (files.some(name => !expected.includes(name) && !expected.some(zip => name === `${zip}.dgst`) && name !== 'SHA256SUMS')) throw new Error('Unexpected release asset');
 
-  const generated = (await github.rest.repos.generateReleaseNotes({ ...repo, tag_name: tag, target_commitish: commit })).data.body;
-  const body = [
-    `Upstream base: [${process.env.UPSTREAM_TAG}](https://github.com/XTLS/Xray-core/releases/tag/${process.env.UPSTREAM_TAG})`,
-    `Source version: ${version}`,
-    `Commit: ${commit}`,
-    `Docker: \`${image}:${version}\` (\`${image}@${digest}\`)`,
-    '', generated,
-  ].join('\n');
+  const previousReleases = await github.paginate(github.rest.repos.listReleases, { ...repo, per_page: 100 });
+  const body = generateNotes({
+    repo: `${repo.owner}/${repo.repo}`,
+    tag,
+    commit,
+    upstreamTag: process.env.UPSTREAM_TAG,
+    upstreamCommit: process.env.UPSTREAM_COMMIT,
+    releases: previousReleases,
+    image,
+    digest,
+  });
   if (!release) {
-    release = (await github.rest.repos.createRelease({ ...repo, tag_name: tag, target_commitish: commit, name: `YAXC ${version}`, body, draft: true, prerelease: false })).data;
+    release = (await github.rest.repos.createRelease({ ...repo, tag_name: tag, target_commitish: commit, name: `proxide ${version}`, body, draft: true, prerelease: false })).data;
   } else {
-    release = (await github.rest.repos.updateRelease({ ...repo, release_id: release.id, name: `YAXC ${version}`, body, draft: true, prerelease: false })).data;
+    release = (await github.rest.repos.updateRelease({ ...repo, release_id: release.id, name: `proxide ${version}`, body, draft: true, prerelease: false })).data;
   }
   const assertDraft = async () => {
     const current = (await github.rest.repos.getRelease({ ...repo, release_id: release.id })).data;

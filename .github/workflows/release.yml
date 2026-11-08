@@ -12,7 +12,7 @@ on:
 
 # Serialize publication, including numeric latest selection, across all release tags.
 concurrency:
-  group: yaxc-release
+  group: proxide-release
   cancel-in-progress: false
 
 permissions:
@@ -30,6 +30,7 @@ jobs:
       commit: ${{ steps.identity.outputs.commit }}
       version: ${{ steps.identity.outputs.version }}
       upstream-tag: ${{ steps.identity.outputs.upstream-tag }}
+      upstream-commit: ${{ steps.identity.outputs.upstream-commit }}
       go-version: ${{ steps.identity.outputs.go-version }}
     steps:
       - uses: actions/checkout@v7
@@ -52,18 +53,19 @@ jobs:
           [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.[1-9][0-9]*$ ]]
           commit=$(git rev-parse HEAD)
           [[ "$commit" =~ ^[0-9a-f]{40}$ && "$commit" == "$GITHUB_SHA" ]]
-          git fetch --no-tags origin "refs/heads/main:refs/remotes/origin/main" "refs/heads/yaxc/main:refs/remotes/origin/yaxc/main" "refs/tags/$tag:refs/release-validation/tag"
+          git fetch --no-tags origin "refs/heads/main:refs/remotes/origin/main" "refs/heads/fork/main:refs/remotes/origin/fork/main" "refs/tags/$tag:refs/release-validation/tag"
           [[ "$(git rev-parse 'refs/release-validation/tag^{commit}')" == "$commit" ]]
-          git merge-base --is-ancestor "$commit" refs/remotes/origin/yaxc/main
+          git merge-base --is-ancestor "$commit" refs/remotes/origin/fork/main
           version=$(go run .github/build/source-version.go)
           [[ "$tag" == "v$version" ]]
           upstream="v${version%.*}"
           git fetch --no-tags https://github.com/XTLS/Xray-core.git "refs/tags/$upstream:refs/release-validation/upstream"
           git merge-base --is-ancestor 'refs/release-validation/upstream^{commit}' "$commit"
           git merge-base --is-ancestor 'refs/release-validation/upstream^{commit}' refs/remotes/origin/main
+          upstream_commit=$(git rev-parse 'refs/release-validation/upstream^{commit}')
           toolchain=$(go env GOVERSION)
           [[ "$toolchain" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          printf 'tag=%s\ncommit=%s\nversion=%s\nupstream-tag=%s\ngo-version=%s\n' "$tag" "$commit" "$version" "$upstream" "${toolchain#go}" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\ncommit=%s\nversion=%s\nupstream-tag=%s\nupstream-commit=%s\ngo-version=%s\n' "$tag" "$commit" "$version" "$upstream" "$upstream_commit" "${toolchain#go}" >> "$GITHUB_OUTPUT"
       - name: Reject already published releases
         uses: actions/github-script@v9
         env:
@@ -262,6 +264,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
@@ -287,6 +290,7 @@ jobs:
           SOURCE_VERSION: ${{ needs.validate.outputs.version }}
           RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
           UPSTREAM_TAG: ${{ needs.validate.outputs.upstream-tag }}
+          UPSTREAM_COMMIT: ${{ needs.validate.outputs.upstream-commit }}
           RELEASE_IMAGE: ${{ needs.docker.outputs.image }}
           RELEASE_DIGEST: ${{ needs.docker.outputs.digest }}
         with:
