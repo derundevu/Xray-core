@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/xtls/xray-core/common/buf"
@@ -657,11 +658,16 @@ func TestTCPCongestion(t *testing.T) {
 	segments(fresh(tcpStart + 2)...)
 }
 
+func TestTCPLossAgain(t *testing.T) {
+	// Virtual time keeps the retransmission thresholds independent of scheduler delays.
+	synctest.Test(t, testTCPLossAgain)
+}
+
 // A loss is paid for once. Acknowledgments that repeat themselves tell of one only when the system cannot say what
 // it has. A segment that was sent again is sent once more when the system still asks for it after an answer had the
 // time to come, and the timer waits for that one. When the timer runs out all the same, the way takes no less
 // afterwards than after the loss, and it is not given at once what one acknowledgment then says has arrived.
-func TestTCPLossAgain(t *testing.T) {
+func testTCPLossAgain(t *testing.T) {
 	conns := make(chan accepted, 5)
 	// start opens a connection that says what it has if sack is set, with twenty segments sent and not acknowledged
 	start := func(src string, sack bool) (*peer, *tcpConn) {
