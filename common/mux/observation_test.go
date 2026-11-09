@@ -128,3 +128,55 @@ func TestMuxObservationKeepsConcretePipeLifetimeAndPackets(t *testing.T) {
 		t.Fatalf("state %s, bytes %d/%d", observation.state, observation.upload.Load(), observation.download.Load())
 	}
 }
+
+func TestMuxWorkerCloseDrainsObservationWithBlockedTransport(t *testing.T) {
+	downReader, downWriter := pipe.New()
+	upReader, upWriter := pipe.New(pipe.WithSizeLimit(0))
+	defer downWriter.Close()
+	defer upReader.Interrupt()
+	// Fill the transport so the session's first frame cannot be written.
+	if err := upWriter.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("full"))}); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := NewClientWorker(transport.Link{Reader: downReader, Writer: upWriter}, ClientStrategy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	input, inputWriter := pipe.New()
+	outputReader, output := pipe.New()
+	defer inputWriter.Close()
+	defer outputReader.Interrupt()
+	read := make(chan struct{}, 1)
+	input.SetReadObserver(func(buf.MultiBuffer) { read <- struct{}{} })
+	if err := inputWriter.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("query"))}); err != nil {
+		t.Fatal(err)
+	}
+	observation := &muxObservation{done: make(chan struct{})}
+	handle := session.NewConnectionObservationHandle(observation)
+	ctx := session.ContextWithOutbounds(context.Background(), []*session.Outbound{{
+		Target: net.TCPDestination(net.LocalHostIP, 80),
+	}})
+	ctx = session.ContextWithConnectionObservation(ctx, handle)
+	if !worker.Dispatch(ctx, &transport.Link{Reader: input, Writer: output}) {
+		t.Fatal("dispatch failed")
+	}
+	handle.Finish("closed")
+	select {
+	case <-read:
+	case <-time.After(5 * time.Second):
+		t.Fatal("session did not read input")
+	}
+	if err := worker.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-observation.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker close left the transport write and observation alive")
+	}
+	if observation.state != "interrupted" {
+		t.Fatalf("state %s, want interrupted", observation.state)
+	}
+}

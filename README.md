@@ -50,6 +50,25 @@ base. Publish the upgraded fork only after merging the verified migration.
 For another fork-only release on the same upstream base, increment
 `ProxideRevision` instead; leave `main` unchanged.
 
+### Xray v26.11.9 compatibility
+
+This base uses [Xray v26.11.9](https://github.com/XTLS/Xray-core/releases/tag/v26.11.9)
+with fork revision `1`, producing source version `26.11.9.1`.
+
+- Freedom `finalRules` use `delay` and support per-rule `logLevel`; upstream
+  still accepts `blockDelay` with a deprecation warning. Review the upstream
+  safe-policy changes for MASQUE before deploying server configurations.
+- Generated log configuration now uses the canonical `logLevel` key.
+  Existing `loglevel` input is still accepted; consumers must not rely on
+  preserving the input key's spelling when re-serializing a configuration.
+- Mux writes use upstream's mutex wrapper while preserving proxide's writer
+  close/interrupt propagation and connection-observation completion.
+- Android executables retain `-checklinkname=0` and use upstream's
+  `-extldflags=-Wl,--pack-dyn-relocs=android`. Rebuild yaxc's `XrayCore.aar`
+  against this base; CLI archives are not a replacement for the AAR.
+- Docker still uses the verified, shared geodata snapshot, not independent
+  downloads from a moving upstream release.
+
 ### Publishing
 
 Local checks need the geodata fixture at `resources/` (and an authenticated
@@ -379,8 +398,8 @@ CGO_ENABLED=0 go build -o xray -trimpath -buildvcs=false -gcflags="all=-l=4" -ld
 For Android:
 
 ```bash
-GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC=/path/to/aarch64-linux-android24-clang go build -o xray -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=REPLACE -s -w -buildid= -checklinkname=0" -v ./main
-GOOS=android GOARCH=amd64 CGO_ENABLED=1 CC=/path/to/x86_64-linux-android24-clang go build -o xray -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=REPLACE -s -w -buildid= -checklinkname=0" -v ./main
+GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC=/path/to/aarch64-linux-android24-clang go build -o xray -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=REPLACE -s -w -buildid= -checklinkname=0 -extldflags=-Wl,--pack-dyn-relocs=android" -v ./main
+GOOS=android GOARCH=amd64 CGO_ENABLED=1 CC=/path/to/x86_64-linux-android24-clang go build -o xray -trimpath -buildvcs=false -gcflags="all=-l=4" -ldflags="-X github.com/xtls/xray-core/core.build=REPLACE -s -w -buildid= -checklinkname=0 -extldflags=-Wl,--pack-dyn-relocs=android" -v ./main
 ```
 
 If you are compiling a 32-bit MIPS/MIPSLE target, use this command instead:

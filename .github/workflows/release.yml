@@ -213,7 +213,7 @@ jobs:
           flags="-X github.com/xtls/xray-core/core.build=$commit -s -w -buildid="
           output=build_assets/xray
           [[ "$GOOS" != windows ]] || output+=.exe
-          [[ "$GOOS" != android ]] || flags+=' -checklinkname=0'
+          [[ "$GOOS" != android ]] || flags+=' -checklinkname=0 -extldflags=-Wl,--pack-dyn-relocs=android'
           gcflags=all=-l=4
           if [[ "$GOARCH" == mips || "$GOARCH" == mipsle ]]; then
             gcflags=-l=4
