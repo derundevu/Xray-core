@@ -65,6 +65,7 @@ func (o *cutoverObserver) Open(session.ConnectionMetadata) session.ConnectionObs
 	o.captures = append(o.captures, capture)
 	return capture
 }
+
 func (o *cutoverObserver) snapshot() []*cutoverObservation {
 	o.mu.Lock()
 	defer o.mu.Unlock()
