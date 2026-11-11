@@ -33,7 +33,11 @@ func (l *Loopback) Process(ctx context.Context, link *transport.Link, _ internet
 	content.SkipDNSResolve = true
 	content.SniffingRequest = l.sniffingRequest
 
+	disabled := session.ConnectionObservationDisabledFromContext(ctx)
 	ctx = session.ContextWithContent(ctx, content)
+	if disabled {
+		session.DisableConnectionObservationAdmission(ctx)
+	}
 	inbound := session.InboundFromContext(ctx)
 	if inbound != nil {
 		// Clone metadata so the loopback tag does not alter the upstream context.

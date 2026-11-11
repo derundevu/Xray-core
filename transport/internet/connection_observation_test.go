@@ -36,7 +36,7 @@ func (h *delayedChainedHandler) Dispatch(context.Context, *transport.Link) { <-h
 
 func TestChainedDispatchRetainsObservationBeforeLaunch(t *testing.T) {
 	observation := &chainedObservation{done: make(chan struct{})}
-	handle := session.NewConnectionObservationHandle(observation)
+	handle := session.NewConnectionObservationHandle(observation, nil)
 	ctx := session.ContextWithConnectionObservation(context.Background(), handle)
 	ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{}})
 	release := make(chan struct{})

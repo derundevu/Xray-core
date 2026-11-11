@@ -37,7 +37,7 @@ func (o *connectionTestObservation) Finish(state string) {
 
 func TestConnectionObservationRetainsMuxLifetime(t *testing.T) {
 	o := new(connectionTestObservation)
-	h := NewConnectionObservationHandle(o)
+	h := NewConnectionObservationHandle(o, nil)
 	releaseSession, releaseInput := h.Retain(), h.Retain()
 	h.Finish("closed")
 	h.Finish("closed")
@@ -55,7 +55,7 @@ func TestConnectionObservationRetainsMuxLifetime(t *testing.T) {
 
 func TestConnectionObservationTrafficDoesNotLockLifecycle(t *testing.T) {
 	o := new(connectionTestObservation)
-	h := NewConnectionObservationHandle(o)
+	h := NewConnectionObservationHandle(o, nil)
 	h.mu.Lock()
 	done := make(chan struct{})
 	go func() { h.AddUpload(17); h.AddDownload(23); close(done) }()
@@ -71,7 +71,7 @@ func TestConnectionObservationTrafficDoesNotLockLifecycle(t *testing.T) {
 
 func TestConnectionObservationRouteAndFinishOnce(t *testing.T) {
 	o := new(connectionTestObservation)
-	h := NewConnectionObservationHandle(o)
+	h := NewConnectionObservationHandle(o, nil)
 	var wg sync.WaitGroup
 	for range 64 {
 		wg.Add(1)
@@ -85,7 +85,7 @@ func TestConnectionObservationRouteAndFinishOnce(t *testing.T) {
 
 func TestConnectionObservationErrorAndInternalContext(t *testing.T) {
 	o := new(connectionTestObservation)
-	h := NewConnectionObservationHandle(o)
+	h := NewConnectionObservationHandle(o, nil)
 	ctx := ContextWithConnectionObservation(context.Background(), h)
 	RecordConnectionError(ctx, errors.New("private failure that must not be forwarded"))
 	SetConnectionOutcome(ctx, "interrupted")
@@ -105,7 +105,7 @@ func TestConnectionObservationCancellationBeforeMuxRelease(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			observation := new(connectionTestObservation)
-			handle := NewConnectionObservationHandle(observation)
+			handle := NewConnectionObservationHandle(observation, nil)
 			handle.BindContext(ctx)
 			release := handle.Retain()
 			handle.SetOutcome(initial)
@@ -125,7 +125,7 @@ func TestConnectionObservationCancellationBeforeMuxRelease(t *testing.T) {
 
 func TestConnectionObservationTaskRunRetainsUnfinishedDownload(t *testing.T) {
 	observation := &connectionTestObservation{finished: make(chan struct{})}
-	handle := NewConnectionObservationHandle(observation)
+	handle := NewConnectionObservationHandle(observation, nil)
 	ctx := ContextWithConnectionObservation(context.Background(), handle)
 	download := make(chan struct{})
 	defer close(download)
@@ -155,7 +155,7 @@ func TestConnectionObservationTaskRunRetainsUnfinishedDownload(t *testing.T) {
 
 func TestConnectionObservationDisabledTasksDoNotRetain(t *testing.T) {
 	observation := &connectionTestObservation{}
-	handle := NewConnectionObservationHandle(observation)
+	handle := NewConnectionObservationHandle(observation, nil)
 	ctx := ContextWithConnectionObservation(context.Background(), handle)
 	ctx = ContextWithConnectionObservationDisabled(ctx)
 	download, exited := make(chan struct{}), make(chan struct{})
@@ -179,7 +179,7 @@ func TestConnectionObservationDetachedContextKeepsOnlyAnalytics(t *testing.T) {
 	type unrelatedKey struct{}
 	original, cancel := context.WithCancel(context.WithValue(context.Background(), unrelatedKey{}, true))
 	defer cancel()
-	handle := NewConnectionObservationHandle(new(connectionTestObservation))
+	handle := NewConnectionObservationHandle(new(connectionTestObservation), nil)
 	ctx := ContextWithConnectionObservation(original, handle)
 	detached := ConnectionObservationDetachedContext(ctx)
 	cancel()
@@ -191,4 +191,61 @@ func TestConnectionObservationDetachedContextKeepsOnlyAnalytics(t *testing.T) {
 		t.Fatal("detached internal dial became observable")
 	}
 	handle.Finish("closed")
+}
+
+func TestConnectionObservationInterruptDetachesRetainedWork(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	observation := new(connectionTestObservation)
+	var completions atomic.Int64
+	handle := NewConnectionObservationHandle(observation, func(*ConnectionObservationHandle) { completions.Add(1) })
+	handle.BindContext(ctx)
+	release, releaseTask := handle.Retain(), handle.RetainTask()
+	handle.AddUpload(17)
+	handle.AddDownload(23)
+	handle.Interrupt()
+	if handle.Active() || handle.observation != nil || handle.ctx != nil || handle.stop != nil || handle.onFinish != nil {
+		t.Fatal("interrupted handle retained observer, callback, or context references")
+	}
+	if ctx.Err() != nil || observation.finishes.Load() != 1 || observation.state != "interrupted" || completions.Load() != 1 {
+		t.Fatal("analytics cutoff cancelled forwarding or missed finalization")
+	}
+	handle.Routed(ConnectionRoute{OutboundTag: "late"})
+	handle.Destination(net.UDPDestination(net.LocalHostIP, 53))
+	handle.SetDownloadDeferred(true)
+	handle.MarkBytesIncomplete()
+	handle.AddUpload(100)
+	handle.AddDownload(200)
+	handle.SetOutcome("error")
+	handle.Finish("closed")
+	release("error")
+	releaseTask(errors.New("late task failure"))
+	handle.Interrupt()
+	cancel()
+	if handle.Retain() != nil || handle.RetainTask() != nil || observation.upload.Load() != 17 || observation.download.Load() != 23 || observation.routes.Load() != 0 || observation.finishes.Load() != 1 || completions.Load() != 1 {
+		t.Fatal("disabled retained work reached observer or finalized twice")
+	}
+}
+
+func TestConnectionObservationDisabledContentIsolation(t *testing.T) {
+	content := &Content{Protocol: "test", SkipDNSResolve: true}
+	ctx := ContextWithContent(context.Background(), content)
+	probe := ContextWithConnectionObservationDisabled(ctx)
+	if !ConnectionObservationDisabledFromContext(probe) || ConnectionObservationDisabledFromContext(ctx) {
+		t.Fatal("internal probe contaminated application admission")
+	}
+	DisableConnectionObservationAdmission(ctx)
+	if !ConnectionObservationDisabledFromContext(ctx) || !ConnectionObservationDisabledFromContext(ConnectionObservationDetachedContext(ctx)) {
+		t.Fatal("old logical flow lost its disabled admission fence")
+	}
+	fresh := SubContextFromMuxInbound(ctx)
+	if ConnectionObservationDisabledFromContext(fresh) || ContentFromContext(fresh) == content || ContentFromContext(fresh).Protocol != "test" || !ContentFromContext(fresh).SkipDNSResolve {
+		t.Fatal("new mux application flow inherited old admission fence or lost routing metadata")
+	}
+	if !ConnectionObservationDisabledFromContext(ctx) {
+		t.Fatal("new mux flow reenabled old logical flow")
+	}
+	if !ConnectionObservationDisabledFromContext(SubContextFromMuxInbound(probe)) {
+		t.Fatal("internal mux probe lost explicit observation exclusion")
+	}
 }

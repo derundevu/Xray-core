@@ -73,7 +73,7 @@ func TestMuxObservationKeepsConcretePipeLifetimeAndPackets(t *testing.T) {
 	defer inputWriter.Close()
 	defer outputReader.Interrupt()
 	observation := &muxObservation{done: make(chan struct{})}
-	handle := session.NewConnectionObservationHandle(observation)
+	handle := session.NewConnectionObservationHandle(observation, nil)
 	inputWriter.SetWriteObserver(func(mb buf.MultiBuffer) { handle.AddUpload(int64(mb.Len())) })
 	output.SetWriteObserver(func(mb buf.MultiBuffer) { handle.AddDownload(int64(mb.Len())) })
 	destination := net.UDPDestination(net.LocalHostIP, 53)
@@ -154,7 +154,7 @@ func TestMuxWorkerCloseDrainsObservationWithBlockedTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	observation := &muxObservation{done: make(chan struct{})}
-	handle := session.NewConnectionObservationHandle(observation)
+	handle := session.NewConnectionObservationHandle(observation, nil)
 	ctx := session.ContextWithOutbounds(context.Background(), []*session.Outbound{{
 		Target: net.TCPDestination(net.LocalHostIP, 80),
 	}})
