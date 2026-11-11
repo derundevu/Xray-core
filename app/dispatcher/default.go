@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common"
@@ -98,7 +99,8 @@ type DefaultDispatcher struct {
 	policy             policy.Manager
 	stats              stats.Manager
 	fdns               dns.FakeDNSEngine
-	connectionObserver ConnectionObserver
+	observerMu         sync.Mutex
+	connectionObserver atomic.Pointer[connectionObserverGeneration]
 }
 
 func init() {
@@ -273,7 +275,6 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 	if !destination.IsValid() {
 		panic("Dispatcher: Invalid destination.")
 	}
-	ctx, observation := d.openConnection(ctx, destination)
 	outbounds := session.OutboundsFromContext(ctx)
 	if len(outbounds) == 0 {
 		outbounds = []*session.Outbound{{}}
@@ -288,6 +289,7 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 		ctx = session.ContextWithContent(ctx, content)
 	}
 
+	ctx, observation := d.openConnection(ctx, destination)
 	sniffingRequest := content.SniffingRequest
 	inbound, outbound := d.getLink(ctx, observation, destination.Network)
 	if !sniffingRequest.Enabled {
@@ -331,7 +333,6 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 	if !destination.IsValid() {
 		return errors.New("Dispatcher: Invalid destination.")
 	}
-	ctx, observation := d.openConnection(ctx, destination)
 	outbounds := session.OutboundsFromContext(ctx)
 	if len(outbounds) == 0 {
 		outbounds = []*session.Outbound{{}}
@@ -345,6 +346,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		content = new(session.Content)
 		ctx = session.ContextWithContent(ctx, content)
 	}
+	ctx, observation := d.openConnection(ctx, destination)
 	outbound = WrapLink(ctx, d.policy, d.stats, outbound)
 	if observation != nil {
 		observeLink(outbound, observation, destination.Network)

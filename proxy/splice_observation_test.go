@@ -141,7 +141,7 @@ func TestSpliceObservationSurvivesTaskEarlyReturn(t *testing.T) {
 			inbound.CanSpliceCopy.Store(1)
 			outbound.CanSpliceCopy.Store(1)
 			observation := &spliceObservation{started: make(chan struct{}), finished: make(chan struct{})}
-			handle := session.NewConnectionObservationHandle(observation)
+			handle := session.NewConnectionObservationHandle(observation, nil)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			handle.BindContext(ctx)

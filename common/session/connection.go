@@ -5,6 +5,7 @@ import (
 	goerrors "errors"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
@@ -72,30 +73,103 @@ func ContextWithConnectionObservationDisabled(ctx context.Context) context.Conte
 
 func ConnectionObservationDisabledFromContext(ctx context.Context) bool {
 	disabled, _ := ctx.Value(connectionObservationDisabledKey).(bool)
-	return disabled
+	content := ContentFromContext(ctx)
+	return disabled || (content != nil && content.connectionObservationDisabled.Load())
+}
+
+// DisableConnectionObservationAdmission fences future nested dispatches of this
+// logical connection. Dispatch initializes Content before admission, so disabled
+// capture needs no observation handle, context wrapper, or task hook allocation.
+func DisableConnectionObservationAdmission(ctx context.Context) {
+	ContentFromContext(ctx).connectionObservationDisabled.Store(true)
 }
 
 // ConnectionObservationHandle owns a logical flow's lifecycle. Retained async work
-// (notably mux sessions) must drain before Finish reaches the observer. The mutex
-// protects lifecycle only; byte accounting never takes it.
+// (notably mux sessions) must drain before normal Finish reaches the observer.
+// callbacks gates observer calls independently of the lifecycle mutex. Detached
+// handles retain only an inert shell: their byte path is one atomic load.
 type ConnectionObservationHandle struct {
-	ConnectionObservation
-	mu         sync.Mutex
-	routeOnce  sync.Once
-	refs       int
-	outcome    string
-	finished   bool
-	stop       func() bool
-	ctx        context.Context
-	finishOnce sync.Once
+	mu          sync.Mutex
+	callbacks   sync.RWMutex
+	active      atomic.Bool
+	observation ConnectionObservation
+	onFinish    func(*ConnectionObservationHandle)
+	routeOnce   sync.Once
+	refs        int
+	outcome     string
+	finished    bool
+	incomplete  bool
+	stop        func() bool
+	ctx         context.Context
+	finishOnce  sync.Once
 }
 
-func NewConnectionObservationHandle(observation ConnectionObservation) *ConnectionObservationHandle {
-	return &ConnectionObservationHandle{ConnectionObservation: observation, refs: 1, outcome: "closed"}
+// onFinish, if non-nil, runs once after the last observer callback, including
+// forced interruption. It must not call back into this handle.
+func NewConnectionObservationHandle(observation ConnectionObservation, onFinish func(*ConnectionObservationHandle)) *ConnectionObservationHandle {
+	h := &ConnectionObservationHandle{observation: observation, onFinish: onFinish, refs: 1, outcome: "closed"}
+	h.active.Store(true)
+	return h
+}
+
+// Active is a cheap forwarding-hook guard. Callers must still use the handle's
+// methods (not cache the underlying observer) because cutoff can race this check.
+func (h *ConnectionObservationHandle) Active() bool {
+	return h.active.Load()
+}
+
+func (h *ConnectionObservationHandle) begin() ConnectionObservation {
+	if !h.active.Load() {
+		return nil
+	}
+	h.callbacks.RLock()
+	if h.observation == nil {
+		h.callbacks.RUnlock()
+		return nil
+	}
+	return h.observation
 }
 
 func (h *ConnectionObservationHandle) Routed(route ConnectionRoute) {
-	h.routeOnce.Do(func() { h.ConnectionObservation.Routed(route) })
+	if observation := h.begin(); observation != nil {
+		h.routeOnce.Do(func() { observation.Routed(route) })
+		h.callbacks.RUnlock()
+	}
+}
+
+func (h *ConnectionObservationHandle) Destination(destination net.Destination) {
+	if observation := h.begin(); observation != nil {
+		observation.Destination(destination)
+		h.callbacks.RUnlock()
+	}
+}
+
+func (h *ConnectionObservationHandle) AddUpload(n int64) {
+	if observation := h.begin(); observation != nil {
+		observation.AddUpload(n)
+		h.callbacks.RUnlock()
+	}
+}
+
+func (h *ConnectionObservationHandle) AddDownload(n int64) {
+	if observation := h.begin(); observation != nil {
+		observation.AddDownload(n)
+		h.callbacks.RUnlock()
+	}
+}
+
+func (h *ConnectionObservationHandle) SetDownloadDeferred(deferred bool) {
+	if observation := h.begin(); observation != nil {
+		observation.SetDownloadDeferred(deferred)
+		h.callbacks.RUnlock()
+	}
+}
+
+func (h *ConnectionObservationHandle) MarkBytesIncomplete() {
+	if observation := h.begin(); observation != nil {
+		observation.MarkBytesIncomplete()
+		h.callbacks.RUnlock()
+	}
 }
 
 func (h *ConnectionObservationHandle) SetOutcome(state string) {
@@ -141,11 +215,15 @@ func (h *ConnectionObservationHandle) RetainTask() func(error) {
 		return nil
 	}
 	h.refs++
-	ctx := h.ctx
 	h.mu.Unlock()
 	var once sync.Once
 	return func(err error) {
-		once.Do(func() { h.release(connectionErrorOutcome(ctx, err)) })
+		once.Do(func() {
+			h.mu.Lock()
+			state := connectionErrorOutcome(h.ctx, err)
+			h.mu.Unlock()
+			h.release(state)
+		})
 	}
 }
 
@@ -169,15 +247,47 @@ func (h *ConnectionObservationHandle) release(state string) {
 		h.outcome = "interrupted"
 	}
 	h.finished = true
-	state = h.outcome
-	stop := h.stop
-	h.stop = nil
-	h.ctx = nil
+	h.mu.Unlock()
+	h.complete()
+}
+
+// Interrupt is a synchronous analytics-only cutoff. It drains callbacks and
+// finalizes unfinished captures without waiting for retained forwarding work.
+func (h *ConnectionObservationHandle) Interrupt() {
+	h.mu.Lock()
+	if !h.finished {
+		h.finished = true
+		h.outcome = "interrupted"
+		h.incomplete = true
+	}
+	h.mu.Unlock()
+	h.complete()
+}
+
+func (h *ConnectionObservationHandle) complete() {
+	h.callbacks.Lock()
+	defer h.callbacks.Unlock()
+	if h.observation == nil {
+		return
+	}
+	h.active.Store(false)
+	observation := h.observation
+	h.observation = nil
+	h.mu.Lock()
+	state, incomplete := h.outcome, h.incomplete
+	stop, onFinish := h.stop, h.onFinish
+	h.stop, h.ctx, h.onFinish = nil, nil, nil
 	h.mu.Unlock()
 	if stop != nil {
 		stop()
 	}
-	h.ConnectionObservation.Finish(state)
+	if incomplete {
+		observation.MarkBytesIncomplete()
+	}
+	observation.Finish(state)
+	if onFinish != nil {
+		onFinish(h)
+	}
 }
 
 // Finish releases the dispatch owner exactly once. Retain callbacks release only

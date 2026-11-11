@@ -52,7 +52,11 @@ func SubContextFromMuxInbound(ctx context.Context) context.Context {
 	content := ContentFromContext(ctx)
 	newContent := Content{}
 	if content != nil {
-		newContent = *content
+		// Mux substreams are new logical application connections. Do not copy
+		// the parent's analytics admission fence (or its atomic state).
+		newContent.Protocol = content.Protocol
+		newContent.SniffingRequest = content.SniffingRequest
+		newContent.SkipDNSResolve = content.SkipDNSResolve
 		if content.Attributes != nil {
 			panic("content.Attributes != nil")
 		}

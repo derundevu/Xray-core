@@ -107,6 +107,7 @@ type SniffingRequest struct {
 }
 
 // Content is the metadata of the connection content. Mainly used for routing.
+// It must not be copied after first use; mux substreams copy routing fields only.
 type Content struct {
 	// Protocol of current content.
 	Protocol string
@@ -118,6 +119,9 @@ type Content struct {
 
 	// SkipDNSResolve is set from DNS module. the DOH remote server maybe a domain name, this prevents cycle resolving dead loop
 	SkipDNSResolve bool
+
+	// Dispatcher-only admission fence, shared by nested dispatch contexts.
+	connectionObservationDisabled atomic.Bool
 }
 
 // Sockopt is the settings for socket connection.
